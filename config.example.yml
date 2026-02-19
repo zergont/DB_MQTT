@@ -1,0 +1,82 @@
+# =============================================================================
+# =============================================================================
+# CG DB-Writer — конфигурация
+# Скопируйте в config.yml и заполните секреты.
+# =============================================================================
+
+# ---------- MQTT (aiomqtt) ---------------------------------------------------
+mqtt:
+  host: "localhost"
+  port: 1883
+  user: ""            # заполнить
+  password: ""        # заполнить
+  tls: false
+  client_id: "cg-db-writer"
+  keepalive: 60
+  reconnect_min_delay: 1
+  reconnect_max_delay: 60
+  subscriptions:
+    decoded: "cg/v1/decoded/SN/+/pcc/+"
+    telemetry: "cg/v1/telemetry/SN/+"
+
+# ---------- PostgreSQL (asyncpg) ---------------------------------------------
+postgres:
+  host: "localhost"
+  port: 5432
+  dbname: "cg_telemetry"
+  user: ""            # заполнить
+  password: ""        # заполнить
+  pool_min: 2
+  pool_max: 10
+
+# ---------- GPS anti-teleport фильтр ----------------------------------------
+gps_filter:
+  sats_min: 4
+  fix_min: 1
+  deadband_m: 30
+  max_jump_m: 500
+  max_speed_kmh: 120
+  confirm_points: 3
+  confirm_radius_m: 50
+
+# ---------- History policy ---------------------------------------------------
+history_policy:
+  defaults:
+    tolerance_analog: 0.5
+    min_interval_sec: 10
+    heartbeat_sec: 900        # 15 мин — дефолт для обычных регистров
+    store_history: true
+    value_kind: "analog"      # analog|discrete|counter|enum|text
+
+  # KPI регистры — частый heartbeat (список addr)
+  kpi_registers:
+    - addr: 40034             # GensetTotal kW (Нагрузка)
+      heartbeat_sec: 60
+      tolerance: 0.1
+    - addr: 40062             # OilPressure (Давление масла двигателя)
+      heartbeat_sec: 60
+      tolerance: 0.1
+
+# ---------- Events policy ----------------------------------------------------
+events_policy:
+  router_stale_sec: 120
+  router_offline_sec: 300
+  panel_stale_sec: 120
+  panel_offline_sec: 300
+  check_interval_sec: 30      # как часто фоновая задача проверяет stale/offline
+  enable_gps_reject_events: true
+  enable_unknown_register_events: true
+
+# ---------- Retention (очистка) ----------------------------------------------
+retention:
+  gps_raw_hours: 72
+  history_days: 30
+  events_days: 90
+  cleanup_interval_hours: 24  # как часто запускать очистку
+  batch_size: 5000            # удалять батчами
+
+# ---------- Logging ----------------------------------------------------------
+logging:
+  level: "INFO"               # DEBUG | INFO | WARNING | ERROR
+  log_file: ""                # пусто = только stdout
+  json_logs: false

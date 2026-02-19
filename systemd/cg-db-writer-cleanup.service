@@ -1,0 +1,12 @@
+[Unit]
+Description=CG DB-Writer — Retention cleanup (oneshot)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=cg
+Group=cg
+WorkingDirectory=/opt/cg-db-writer
+ExecStart=/opt/cg-db-writer/venv/bin/python -m src --config /opt/cg-db-writer/config.yml --cleanup
+StandardOutput=journal
+StandardError=journal

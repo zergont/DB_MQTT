@@ -1,0 +1,23 @@
+[Unit]
+Description=CG DB-Writer — Telemetry Storage Service
+After=network.target postgresql.service mosquitto.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=cg
+Group=cg
+WorkingDirectory=/opt/cg-db-writer
+ExecStart=/opt/cg-db-writer/venv/bin/python -m src --config /opt/cg-db-writer/config.yml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Безопасность
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
