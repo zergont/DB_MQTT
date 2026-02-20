@@ -1,5 +1,4 @@
-"""
-CG DB-Writer — загрузка и валидация конфигурации из YAML.
+""" CG DB-Writer — загрузка и валидация конфигурации из YAML.
 """
 
 from __future__ import annotations
@@ -30,9 +29,9 @@ class MqttCfg:
     keepalive: int = 60
     reconnect_min_delay: int = 1
     reconnect_max_delay: int = 60
+
     sub_decoded: str = "cg/v1/decoded/SN/+/pcc/+"
     sub_telemetry: str = "cg/v1/telemetry/SN/+"
-
 
 @dataclass
 class PostgresCfg:
@@ -41,6 +40,7 @@ class PostgresCfg:
     dbname: str = "cg_telemetry"
     user: str = ""
     password: str = ""
+
     pool_min: int = 2
     pool_max: int = 10
 
@@ -51,6 +51,35 @@ class PostgresCfg:
             f"@{self.host}:{self.port}/{self.dbname}"
         )
 
+@dataclass
+class IngestCfg:
+    """Настройки приёма сообщений и защиты от перегрузки.
+
+    Идея: MQTT loop максимально быстро читает сообщения и складывает в очереди,
+    а воркеры пишут в БД. Это даёт буфер и предсказуемость при лаге PostgreSQL.
+
+    decoded_queue_maxsize:
+        Очередь decoded сообщений (самый большой поток).
+    telemetry_queue_maxsize:
+        Очередь GPS/telemetry (маленький поток, но важный).
+    worker_count:
+        Кол-во DB-воркеров. Для стабильности по умолчанию 1 (без гонок по кэшам).
+        Можно увеличить до 2-4 при достаточном pool_max и CPU.
+    drop_decoded_when_full:
+        Если decoded очередь переполнена — выбрасывать данные вместо блокировки MQTT loop.
+        Для надёжности "в реальном времени" обычно лучше drop_oldest, чем зависание.
+    """
+    decoded_queue_maxsize: int = 5000
+    telemetry_queue_maxsize: int = 200
+    worker_count: int = 1
+
+    # При переполнении decoded очереди:
+    drop_decoded_when_full: bool = True
+    drop_decoded_policy: str = "drop_oldest"  # drop_oldest | drop_new
+
+    # Ретрай DB операций (внутри воркера)
+    worker_max_retries: int = 3
+    worker_retry_delay_sec: float = 2.0
 
 @dataclass
 class GpsFilterCfg:
@@ -62,13 +91,11 @@ class GpsFilterCfg:
     confirm_points: int = 3
     confirm_radius_m: float = 50.0
 
-
 @dataclass
 class KpiRegister:
     addr: int
     heartbeat_sec: int = 60
     tolerance: float = 0.1
-
 
 @dataclass
 class HistoryDefaults:
@@ -77,7 +104,6 @@ class HistoryDefaults:
     heartbeat_sec: int = 900
     store_history: bool = True
     value_kind: str = "analog"
-
 
 @dataclass
 class HistoryPolicyCfg:
@@ -88,7 +114,6 @@ class HistoryPolicyCfg:
         """addr → KpiRegister для быстрого поиска."""
         return {k.addr: k for k in self.kpi_registers}
 
-
 @dataclass
 class EventsPolicyCfg:
     router_stale_sec: int = 120
@@ -96,18 +121,18 @@ class EventsPolicyCfg:
     panel_stale_sec: int = 120
     panel_offline_sec: int = 300
     check_interval_sec: int = 30
+
     enable_gps_reject_events: bool = True
     enable_unknown_register_events: bool = True
-
 
 @dataclass
 class RetentionCfg:
     gps_raw_hours: int = 72
     history_days: int = 30
     events_days: int = 90
+
     cleanup_interval_hours: int = 24
     batch_size: int = 5000
-
 
 @dataclass
 class LoggingCfg:
@@ -115,11 +140,11 @@ class LoggingCfg:
     log_file: str = ""
     json_logs: bool = False
 
-
 @dataclass
 class AppConfig:
     mqtt: MqttCfg = field(default_factory=MqttCfg)
     postgres: PostgresCfg = field(default_factory=PostgresCfg)
+    ingest: IngestCfg = field(default_factory=IngestCfg)
     gps_filter: GpsFilterCfg = field(default_factory=GpsFilterCfg)
     history_policy: HistoryPolicyCfg = field(default_factory=HistoryPolicyCfg)
     events_policy: EventsPolicyCfg = field(default_factory=EventsPolicyCfg)
@@ -173,6 +198,7 @@ def load_config(path: str | Path) -> AppConfig:
     cfg = AppConfig(
         mqtt=_parse_mqtt(raw.get("mqtt")),
         postgres=_merge(PostgresCfg, raw.get("postgres")),
+        ingest=_merge(IngestCfg, raw.get("ingest")),
         gps_filter=_merge(GpsFilterCfg, raw.get("gps_filter")),
         history_policy=_parse_history(raw.get("history_policy")),
         events_policy=_merge(EventsPolicyCfg, raw.get("events_policy")),

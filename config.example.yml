@@ -1,5 +1,4 @@
 # =============================================================================
-# =============================================================================
 # CG DB-Writer — конфигурация
 # Скопируйте в config.yml и заполните секреты.
 # =============================================================================
@@ -8,15 +7,15 @@
 mqtt:
   host: "localhost"
   port: 1883
-  user: ""            # заполнить
-  password: ""        # заполнить
+  user: ""        # заполнить
+  password: ""    # заполнить
   tls: false
   client_id: "cg-db-writer"
   keepalive: 60
   reconnect_min_delay: 1
   reconnect_max_delay: 60
   subscriptions:
-    decoded: "cg/v1/decoded/SN/+/pcc/+"
+    decoded:   "cg/v1/decoded/SN/+/pcc/+"
     telemetry: "cg/v1/telemetry/SN/+"
 
 # ---------- PostgreSQL (asyncpg) ---------------------------------------------
@@ -24,10 +23,29 @@ postgres:
   host: "localhost"
   port: 5432
   dbname: "cg_telemetry"
-  user: ""            # заполнить
-  password: ""        # заполнить
+  user: ""        # заполнить
+  password: ""    # заполнить
   pool_min: 2
   pool_max: 10
+
+# ---------- Ingest pipeline (queues + workers) -------------------------------
+ingest:
+  # decoded — основной поток данных (много сообщений)
+  decoded_queue_maxsize: 5000
+  # telemetry — GPS/объект (редко, но важно)
+  telemetry_queue_maxsize: 200
+
+  # DB workers: по умолчанию 1 (без гонок по внутренним кэшам).
+  # Если CPU/БД позволяют — 2..4, но тогда увеличьте postgres.pool_max.
+  worker_count: 1
+
+  # Если decoded очередь переполнится:
+  drop_decoded_when_full: true
+  drop_decoded_policy: "drop_oldest"   # drop_oldest | drop_new
+
+  # Ретрай при временных ошибках БД
+  worker_max_retries: 3
+  worker_retry_delay_sec: 2.0
 
 # ---------- GPS anti-teleport фильтр ----------------------------------------
 gps_filter:
@@ -44,16 +62,16 @@ history_policy:
   defaults:
     tolerance_analog: 0.5
     min_interval_sec: 10
-    heartbeat_sec: 900        # 15 мин — дефолт для обычных регистров
+    heartbeat_sec: 900      # 15 мин — дефолт для обычных регистров
     store_history: true
-    value_kind: "analog"      # analog|discrete|counter|enum|text
+    value_kind: "analog"    # analog|discrete|counter|enum|text
 
   # KPI регистры — частый heartbeat (список addr)
   kpi_registers:
-    - addr: 40034             # GensetTotal kW (Нагрузка)
+    - addr: 40034           # GensetTotal kW (Нагрузка)
       heartbeat_sec: 60
       tolerance: 0.1
-    - addr: 40062             # OilPressure (Давление масла двигателя)
+    - addr: 40062           # OilPressure (Давление масла двигателя)
       heartbeat_sec: 60
       tolerance: 0.1
 
@@ -63,7 +81,7 @@ events_policy:
   router_offline_sec: 300
   panel_stale_sec: 120
   panel_offline_sec: 300
-  check_interval_sec: 30      # как часто фоновая задача проверяет stale/offline
+  check_interval_sec: 30
   enable_gps_reject_events: true
   enable_unknown_register_events: true
 
@@ -72,11 +90,11 @@ retention:
   gps_raw_hours: 72
   history_days: 30
   events_days: 90
-  cleanup_interval_hours: 24  # как часто запускать очистку
-  batch_size: 5000            # удалять батчами
+  cleanup_interval_hours: 24
+  batch_size: 5000
 
 # ---------- Logging ----------------------------------------------------------
 logging:
-  level: "INFO"               # DEBUG | INFO | WARNING | ERROR
-  log_file: ""                # пусто = только stdout
+  level: "INFO"     # DEBUG | INFO | WARNING | ERROR
+  log_file: ""      # пусто = только stdout
   json_logs: false

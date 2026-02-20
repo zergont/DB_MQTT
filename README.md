@@ -1,37 +1,43 @@
-# CG DB-Writer — Модуль хранения телеметрии
+# CG DB-Writer — модуль хранения телеметрии (MQTT → PostgreSQL)
 
-**Проект:** «Честная генерация»  
-**Назначение:** подписка на MQTT-брокер, приём GPS и decoded-телеметрии панелей PCC, сохранение в PostgreSQL.
+Проект: **«Честная генерация»**  
+Назначение: подписка на MQTT-брокер, приём **GPS объекта** и **decoded-телеметрии панелей (PCC 3.3)**, сохранение в **PostgreSQL** с политикой, чтобы база **не раздувалась**.
 
 ## Что делает DB-Writer
 
 | Входные данные | Топик MQTT | Что пишет в БД |
 |---|---|---|
-| GPS объекта | `cg/v1/telemetry/SN/<router_sn>` | `gps_raw_history` (все точки), `gps_latest_filtered` (стабильная) |
+| GPS объекта | `cg/v1/telemetry/SN/<router_sn>` | `gps_raw_history` (все точки), `gps_latest_filtered` (стабильная точка) |
 | Decoded регистры панели | `cg/v1/decoded/SN/<router_sn>/pcc/<panel_id>` | `latest_state` (срез), `history` (по правилам), `events` |
 
 ### Ключевые принципы
 - **latest_state** — фиксированный объём, всегда актуальный срез.
-- **history** — только изменения (с tolerance/deadband) + heartbeat для KPI.
+- **history** — только изменения (tolerance/deadband) + **heartbeat** для KPI.
 - **events** — offline/online переходы, GPS reject, unknown register.
-- **GPS anti-teleport** — фильтрация скачков с confirm-буфером.
-- БД не раздувается: retention автоматически чистит старые данные.
-
----
+- **GPS anti-teleport** — фильтрация скачков координат (confirm-буфер).
+- **Retention** — автоматическая очистка старых данных.
 
 ## Требования
-
 - **OS:** Ubuntu 22.04 / 24.04
 - **Python:** 3.13+
 - **PostgreSQL:** 14+
-- **MQTT-брокер:** Mosquitto или совместимый (доступ по сети)
+- **MQTT-брокер:** Mosquitto или совместимый
 
----
+## Конфигурация
+Все настройки в одном файле: `config.yml` (в репозитории хранится только шаблон `config.example.yml`).
+
+Ключевые секции:
+- `mqtt` — host/port/учётка + топики подписки (`decoded`, `telemetry`)
+- `postgres` — подключение к БД + размеры пула
+- `gps_filter` — пороги anti-teleport
+- `history_policy` — tolerance/min_interval/heartbeat + KPI addr
+- `events_policy` — stale/offline пороги + включение отдельных событий
+- `retention` — сроки хранения и батч очистки
+- `logging` — уровни/файл/JSON-логи
 
 ## Установка и запуск
 
 ### Быстрая установка (Ubuntu, один скрипт)
-
 ```bash
 git clone https://github.com/zergont/DB_MQTT.git /opt/cg-db-writer
 cd /opt/cg-db-writer
@@ -39,13 +45,12 @@ sudo chmod +x scripts/install.sh
 sudo ./scripts/install.sh
 ```
 
-Скрипт создаст venv, установит зависимости, скопирует systemd unit-файлы.  
-После этого нужно выполнить шаги 1–3 ниже.
+Скрипт создаст venv, установит зависимости, поставит systemd unit-файлы.  
+Далее выполните шаги 1–3 ниже (создать БД, применить схему, health-check).
 
 ### Пошаговая установка (вручную)
 
-#### 1. Клонировать и настроить
-
+#### 1) Клонировать и подготовить venv
 ```bash
 cd /opt
 git clone https://github.com/zergont/DB_MQTT.git cg-db-writer
@@ -59,18 +64,18 @@ cp config.example.yml config.yml
 nano config.yml    # ← заполнить mqtt и postgres секции
 ```
 
-#### 2. Подготовить PostgreSQL
-
+#### 2) Подготовить PostgreSQL
 ```bash
 sudo -u postgres psql
 ```
+
 ```sql
 CREATE USER cg_writer WITH PASSWORD 'your_password';
 CREATE DATABASE cg_telemetry OWNER cg_writer;
 \q
 ```
 
-Применить схему — **автоматически через скрипт:**
+Применить схему (рекомендуется скриптом):
 ```bash
 source venv/bin/activate
 python scripts/setup_db.py --config config.yml
@@ -81,54 +86,22 @@ python scripts/setup_db.py --config config.yml
 PGPASSWORD=your_password psql -h localhost -U cg_writer -d cg_telemetry -f schema/001_init.sql
 ```
 
-#### 3. Проверить подключения
-
+#### 3) Проверить подключения (health-check)
 ```bash
 python scripts/check_health.py --config config.yml
 ```
 
-Ожидаемый вывод:
-```
-=============================================================
-PostgreSQL
-=============================================================
-  host: localhost:5432  db: cg_telemetry  user: cg_writer
-  Подключение: OK
-  Таблицы: все на месте
-=============================================================
-MQTT
-=============================================================
-  host: localhost:1883
-  Подключение: OK
-=============================================================
-ИТОГО
-  PostgreSQL:  OK
-  MQTT:        OK
-  Всё в порядке! DB-Writer может работать.
-```
+Ожидаемо: PostgreSQL OK, MQTT OK.
 
-#### 4. Запуск в foreground (для теста)
-
+#### 4) Запуск в foreground (для теста)
 ```bash
 source venv/bin/activate
 python -m src --config config.yml
 ```
 
-Ожидаемый вывод:
-```
-2025-01-01 12:00:00  INFO     [cg.config]  Config loaded from config.yml
-2025-01-01 12:00:00  INFO     [cg.db]      PG pool created  min=2 max=10
-2025-01-01 12:00:00  INFO     [cg.main]    Restored GPS state for 0 objects
-2025-01-01 12:00:00  INFO     [cg.main]    Connecting to MQTT localhost:1883 …
-2025-01-01 12:00:00  INFO     [cg.main]    MQTT connected, subscribed: …
-2025-01-01 12:00:00  INFO     [cg.watchdog] Watchdog started, interval=30s
-2025-01-01 12:00:00  INFO     [cg.retention] Retention task started: …
-```
-
 Остановка: `Ctrl+C`.
 
-#### 5. Запуск как systemd service (production)
-
+#### 5) Запуск как systemd service (production)
 ```bash
 sudo cp systemd/cg-db-writer.service /etc/systemd/system/
 sudo cp systemd/cg-db-writer-cleanup.service /etc/systemd/system/
@@ -148,36 +121,16 @@ sudo systemctl status cg-db-writer
 sudo journalctl -u cg-db-writer -f
 ```
 
----
+> Примечание: в сервисе уже есть встроенный retention-loop. Timer нужен только если вы сознательно хотите чистку отдельно.
 
-## Как понять что работает
+## Как понять, что работает
 
-### Быстрая проверка (одна команда)
-
+### 1) Быстрая проверка
 ```bash
 python scripts/check_health.py --config config.yml
 ```
 
-Скрипт проверит подключения к PostgreSQL и MQTT, покажет количество строк в каждой таблице и свежесть данных. Если всё зелёное и счётчики растут — работает.
-
-### Проверка через логи
-
-```bash
-# Если запущен как systemd service:
-sudo journalctl -u cg-db-writer -f
-
-# Если запущен в foreground — логи идут в stdout
-```
-
-Что искать в логах:
-- `MQTT connected, subscribed` — подключился к брокеру
-- `GPS ... accepted=True` — GPS точки принимаются (level=DEBUG)
-- `Decoded .../pcc/...: N regs, M history writes` — decoded обрабатывается (level=DEBUG)
-- `Watchdog started` — мониторинг offline/online запущен
-- `Retention task started` — очистка запланирована
-
-### Проверка через SQL
-
+### 2) Проверка через SQL
 ```sql
 -- Сколько данных всего?
 SELECT 'objects' AS tbl, count(*) FROM objects
@@ -189,269 +142,87 @@ UNION ALL SELECT 'events', count(*) FROM events;
 
 -- Последние GPS точки
 SELECT router_sn, accepted, reject_reason, lat, lon, received_at
-FROM gps_raw_history ORDER BY id DESC LIMIT 10;
+FROM gps_raw_history
+ORDER BY id DESC
+LIMIT 10;
 
 -- Актуальный срез регистров
-SELECT router_sn, panel_id, addr, name, value, unit, reason, updated_at
-FROM latest_state ORDER BY updated_at DESC LIMIT 20;
+SELECT router_sn, equip_type, panel_id, addr, name, value, unit, reason, updated_at
+FROM latest_state
+ORDER BY updated_at DESC
+LIMIT 20;
 
 -- Последние события
-SELECT type, router_sn, description, created_at
-FROM events ORDER BY id DESC LIMIT 10;
+SELECT type, router_sn, equip_type, panel_id, description, created_at
+FROM events
+ORDER BY id DESC
+LIMIT 10;
 ```
 
-### Тестовая отправка сообщений
-
+### 3) Тестовая отправка сообщений
 ```bash
-python scripts/test_publish.py --host <mqtt_host> --sn TEST001
+python scripts/test_publish.py --host <MQTT_HOST> --sn TEST001
 ```
 
-Скрипт отправит 4 тестовых сообщения (GPS normal, GPS teleport, decoded с 3 регистрами, decoded повтор) и напечатает что проверять.
+## Нагрузка и надёжность (под ваш кейс)
 
----
+Ожидаемая нагрузка: **10 панелей × до 6 устройств** (≈60 “единиц”), плюс GPS раз в 30–60 сек.  
+Эта схема нормально укладывается в PostgreSQL при условии:
+- history пишет **не всё подряд**, а по политике (tolerance/min_interval/heartbeat)
+- включена очистка (retention)
+- пул соединений адекватный
 
-## Проверка работы
+Рекомендации “на надёжность”:
+1) **Ограничение входного потока (backpressure)**  
+   Если вы ожидаете всплески сообщений или временные тормоза БД — лучший паттерн: `asyncio.Queue(maxsize=...)` и 1–2 DB-воркера.  
+   Это защищает процесс от лавины задач и даёт прогнозируемое поведение.
+2) **Кэш register_catalog и last_state в памяти**  
+   Это уменьшает число SELECT на каждый регистр и повышает устойчивость под нагрузкой.
+3) **Circuit breaker / backoff на ошибки БД**  
+   При временной недоступности PostgreSQL — логируем и делаем задержку (1/2/5/10 сек), чтобы не устроить DDoS логами и не убить CPU.
 
-### A) Проверка GPS
-
-Установите тестовые зависимости:
-```bash
-pip install paho-mqtt
-```
-
-**Отправить нормальную GPS точку:**
-```bash
-mosquitto_pub -t "cg/v1/telemetry/SN/6003790403" -m '{
-  "GPS": {
-    "latitude": 59.851624,
-    "longitude": 30.479838,
-    "satellites": 8,
-    "fix_status": 1,
-    "timestamp": 1700000000,
-    "date_iso_8601": "2025-01-01T12:00:00+0300"
-  }
-}'
-```
-
-**Проверить SQL:**
-```sql
--- Должна быть запись с accepted=true
-SELECT * FROM gps_raw_history WHERE router_sn = '6003790403' ORDER BY id DESC LIMIT 5;
-
--- Должна появиться стабильная точка
-SELECT * FROM gps_latest_filtered WHERE router_sn = '6003790403';
-```
-
-**Отправить «телепорт» (Москва вместо СПб):**
-```bash
-mosquitto_pub -t "cg/v1/telemetry/SN/6003790403" -m '{
-  "GPS": {
-    "latitude": 55.751244,
-    "longitude": 37.618423,
-    "satellites": 10,
-    "fix_status": 1,
-    "timestamp": 1700000060,
-    "date_iso_8601": "2025-01-01T12:01:00+0300"
-  }
-}'
-```
-
-**Проверить SQL:**
-```sql
--- Должна быть запись с accepted=false, reject_reason='jump_distance'
-SELECT accepted, reject_reason, lat, lon
-FROM gps_raw_history
-WHERE router_sn = '6003790403'
-ORDER BY id DESC LIMIT 5;
-
--- gps_latest_filtered НЕ изменился
-SELECT * FROM gps_latest_filtered WHERE router_sn = '6003790403';
-
--- Должен быть event (если enable_gps_reject_events=true)
-SELECT * FROM events WHERE router_sn = '6003790403' AND type = 'gps_jump_rejected';
-```
-
-### B) Проверка decoded
-
-**Отправить decoded с 3 регистрами:**
-```bash
-mosquitto_pub -t "cg/v1/decoded/SN/6003790403/pcc/1" -m '{
-  "timestamp": "2025-01-01T12:00:00+0300",
-  "router_sn": "6003790403",
-  "bserver_id": 1,
-  "registers": [
-    {"addr": 40034, "name": "GensetTotal kW", "value": 150.5, "text": "150.5", "unit": "kW", "raw": 1505, "reason": null},
-    {"addr": 40062, "name": "OilPressure", "value": null, "text": null, "unit": "kPa", "raw": null, "reason": "Значение NA"},
-    {"addr": 49999, "name": null, "value": 42, "text": "42", "unit": null, "raw": 42, "reason": "Неизвестный регистр"}
-  ]
-}'
-```
-
-**Проверить SQL:**
-```sql
--- latest_state обновился для 3 регистров
-SELECT addr, name, value, raw, reason
-FROM latest_state
-WHERE router_sn = '6003790403' AND panel_id = 1;
-
--- history — должны быть записи (первый раз = change)
-SELECT addr, value, write_reason
-FROM history
-WHERE router_sn = '6003790403' AND panel_id = 1
-ORDER BY id DESC LIMIT 10;
-
--- event для unknown register (если enable_unknown_register_events=true)
-SELECT * FROM events WHERE type = 'unknown_register';
-```
-
-**Проверить heartbeat KPI:** Подождите `heartbeat_sec` (60 сек в конфиге для KPI) без изменения значений, затем:
-```sql
-SELECT addr, write_reason, ts
-FROM history
-WHERE router_sn = '6003790403' AND addr IN (40034, 40062)
-ORDER BY id DESC LIMIT 10;
--- Должны появиться записи с write_reason='heartbeat'
-```
-
-### C) Проверка events (offline/online)
-
-1. Убедитесь, что DB-Writer работает и получает сообщения.
-2. Остановите публикацию (выключите декодер или брокер).
-3. Подождите `router_offline_sec` (300 сек по умолчанию).
-
-```sql
-SELECT * FROM events WHERE type IN ('router_offline', 'router_online')
-ORDER BY created_at DESC LIMIT 10;
-```
-
-4. Возобновите публикацию — должен появиться event `router_online`.
-
-### D) Проверка retention
-
-**Ручной запуск очистки:**
-```bash
-python -m src --config config.yml --cleanup
-```
-
-**(Опционально) через systemd timer (если вы его включили):**
-```bash
-sudo systemctl start cg-db-writer-cleanup.service
-sudo journalctl -u cg-db-writer-cleanup -n 20
-```
-
-**SQL-проверка:**
-```sql
--- До очистки
-SELECT count(*) FROM gps_raw_history WHERE received_at < now() - interval '72 hours';
-SELECT count(*) FROM history WHERE received_at < now() - interval '30 days';
-SELECT count(*) FROM events WHERE created_at < now() - interval '90 days';
-
--- После очистки — все три запроса должны вернуть 0
-```
-
-### E) Автоматический тест (скрипт)
-
-```bash
-python scripts/test_publish.py --host localhost --sn TEST001
-```
-
-Скрипт отправит 4 сообщения (GPS normal, GPS teleport, decoded, decoded repeat) и выведет подсказки.
-
----
+Если хотите, я подготовлю короткий “дизайн-док” для этих трёх улучшений (без кода, но с точными шагами и настройками).
 
 ## Структура проекта
-
-```
+```text
 cg-db-writer/
-├── config.example.yml          # Шаблон конфигурации (без секретов)
-├── requirements.txt            # Python зависимости
-├── .gitignore                  # config.yml, env/, __pycache__/ и т.д.
+├── config.example.yml
+├── requirements.txt
 ├── schema/
-│   └── 001_init.sql            # SQL схема — все таблицы и индексы
+│   └── 001_init.sql
 ├── src/
-│   ├── __init__.py
-│   ├── __main__.py             # python -m src
-│   ├── main.py                 # Точка входа, event loop, MQTT
-│   ├── config.py               # Загрузка config.yml
-│   ├── log.py                  # Настройка логирования
-│   ├── db.py                   # Все SQL операции (asyncpg)
-│   ├── handlers.py             # Обработка MQTT сообщений
-│   ├── gps_filter.py           # GPS anti-teleport фильтр
-│   ├── history_policy.py       # Логика «писать ли в history»
-│   ├── watchdog.py             # Мониторинг online/offline/stale
-│   └── retention.py            # Очистка устаревших данных
+│   ├── main.py
+│   ├── handlers.py
+│   ├── db.py
+│   ├── gps_filter.py
+│   ├── history_policy.py
+│   ├── watchdog.py
+│   └── retention.py
 ├── scripts/
-│   ├── install.sh              # Автоустановка на Ubuntu
-│   ├── setup_db.py             # Применение SQL схемы
-│   ├── check_health.py         # Проверка подключений и данных
-│   ├── test_publish.py         # Тестовая публикация в MQTT
-│   └── smoke_test.py           # Локальный тест без MQTT/Postgres
+│   ├── install.sh
+│   ├── setup_db.py
+│   ├── check_health.py
+│   └── test_publish.py
 ├── systemd/
-│   ├── cg-db-writer.service    # systemd unit
+│   ├── cg-db-writer.service
 │   ├── cg-db-writer-cleanup.service
 │   └── cg-db-writer-cleanup.timer
 └── README.md
 ```
 
----
-
-## Конфигурация
-
-Все настройки — в `config.yml`. Подробное описание каждой секции — в `config.example.yml` (с комментариями).
-
-Ключевые секции:
-
-| Секция | Что настраивает |
-|---|---|
-| `mqtt` | Подключение к брокеру, топики подписки |
-| `postgres` | Подключение к БД, размер пула |
-| `gps_filter` | Пороги anti-teleport (sats, fix, jump, speed, confirm) |
-| `history_policy` | Tolerance, min_interval, heartbeat, KPI регистры |
-| `events_policy` | Пороги stale/offline, включение GPS/unknown events |
-| `retention` | Сроки хранения (gps 72h, history 30d, events 90d) |
-| `logging` | Уровень, файл, JSON формат |
-
----
-
 ## Troubleshooting
 
 ### MQTT не коннектится
-```
-MQTT connection lost: [Errno 111] Connection refused
-```
 - Проверьте host/port в `config.yml`
-- Проверьте что Mosquitto запущен: `systemctl status mosquitto`
-- Проверьте user/password
+- Проверьте брокер: `systemctl status mosquitto`
+- Проверьте логин/пароль, TLS
 
 ### PostgreSQL не коннектится
-```
-asyncpg.InvalidPasswordError
-```
 - Проверьте host/port/dbname/user/password в `config.yml`
-- Проверьте `pg_hba.conf` (разрешён ли md5/scram для вашего пользователя)
+- Проверьте `pg_hba.conf` (md5/scram), доступ с сервера
 
 ### History «не растёт»
-- Значение не изменилось больше чем `tolerance` — это нормально.
-- `min_interval_sec` не прошёл — подождите.
-- `heartbeat_sec` ещё не наступил — проверьте настройку (для KPI — 60 сек).
-- `store_history: false` в `register_catalog` — регистр исключён из истории.
-
-### GPS всё время rejected
-```sql
-SELECT reject_reason, count(*) FROM gps_raw_history
-WHERE router_sn = '...' GROUP BY reject_reason;
-```
-- `low_sats` → уменьшите `sats_min` (по умолчанию 4)
-- `bad_fix` → уменьшите `fix_min`
-- `jump_distance` / `jump_speed` → увеличьте `max_jump_m` / `max_speed_kmh`
-- Если объект реально переехал → дождитесь `confirm_points` (по умолчанию 3 точки в радиусе 50м)
-
-### Логи
-```bash
-# systemd
-sudo journalctl -u cg-db-writer -f
-
-# foreground с debug
-# В config.yml: logging.level: DEBUG
-python -m src --config config.yml
-```
+Это часто **нормально**: политика history режет поток.
+- значение не изменилось больше tolerance
+- min_interval ещё не прошёл
+- heartbeat ещё не наступил (для KPI обычно 60 сек)

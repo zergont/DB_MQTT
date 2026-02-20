@@ -1,5 +1,4 @@
-"""
-CG DB-Writer — обработка входящих MQTT сообщений.
+""" CG DB-Writer — обработка входящих MQTT сообщений.
 """
 
 from __future__ import annotations
@@ -49,6 +48,7 @@ async def dispatch(
     panel_last_seen: dict[tuple[str, int], datetime],
 ) -> None:
     """Главная точка входа: topic + raw payload → обработка."""
+
     m_tel = _RE_TELEMETRY.match(topic)
     if m_tel:
         router_sn = m_tel.group(1)
@@ -90,12 +90,14 @@ def _parse_gps_time(gps: dict[str, Any]) -> datetime | None:
             return datetime.fromisoformat(iso)
         except (ValueError, TypeError):
             pass
+
     ts = gps.get("timestamp")
     if ts:
         try:
             return datetime.fromtimestamp(int(ts), tz=timezone.utc)
         except (ValueError, TypeError, OSError):
             pass
+
     return None
 
 
@@ -119,12 +121,15 @@ async def _handle_telemetry(
     satellites = _safe_int(gps.get("satellites"))
     fix_status = _safe_int(gps.get("fix_status"))
     gps_time = _parse_gps_time(gps)
-    now = datetime.now(timezone.utc)
 
+    now = datetime.now(timezone.utc)
     pt = GpsPoint(
-        lat=lat, lon=lon,
-        satellites=satellites, fix_status=fix_status,
-        gps_time=gps_time, received_at=now,
+        lat=lat,
+        lon=lon,
+        satellites=satellites,
+        fix_status=fix_status,
+        gps_time=gps_time,
+        received_at=now,
     )
 
     flt = get_gps_filter(router_sn, cfg)
@@ -136,15 +141,19 @@ async def _handle_telemetry(
 
             # Всегда пишем raw
             await db.insert_gps_raw(
-                conn, router_sn, gps_time, lat, lon,
-                satellites, fix_status,
-                verdict.accepted, verdict.reject_reason,
+                conn,
+                router_sn,
+                gps_time,
+                lat,
+                lon,
+                satellites,
+                fix_status,
+                verdict.accepted,
+                verdict.reject_reason,
             )
 
             if verdict.accepted:
                 # Обновляем latest только если за пределами deadband
-                # (если accepted и внутри deadband — всё равно accepted,
-                #  но latest можно не трогать)
                 last = flt.last_accepted
                 update_latest = True
                 if last is not None:
@@ -156,17 +165,24 @@ async def _handle_telemetry(
 
                 if update_latest:
                     await db.upsert_gps_latest(
-                        conn, router_sn, gps_time, lat, lon,
-                        satellites, fix_status,
+                        conn,
+                        router_sn,
+                        gps_time,
+                        lat,
+                        lon,
+                        satellites,
+                        fix_status,
                     )
 
             elif cfg.events_policy.enable_gps_reject_events:
                 await db.insert_event(
-                    conn, router_sn,
+                    conn,
+                    router_sn,
                     "gps_jump_rejected",
                     description=f"reason={verdict.reject_reason} lat={lat} lon={lon}",
                     payload={
-                        "lat": lat, "lon": lon,
+                        "lat": lat,
+                        "lon": lon,
                         "reject_reason": verdict.reject_reason,
                         "satellites": satellites,
                     },
@@ -174,7 +190,11 @@ async def _handle_telemetry(
 
     logger.debug(
         "GPS %s: accepted=%s reason=%s lat=%.6f lon=%.6f",
-        router_sn, verdict.accepted, verdict.reject_reason, lat, lon,
+        router_sn,
+        verdict.accepted,
+        verdict.reject_reason,
+        lat,
+        lon,
     )
 
 
@@ -203,30 +223,69 @@ async def _handle_decoded(
         logger.warning("No registers[] in decoded %s/%d", router_sn, panel_id)
         return
 
+    # Собираем addr (один раз) — пригодится для bulk SELECT
+    addrs: list[int] = []
+    for reg in registers:
+        try:
+            addrs.append(int(reg["addr"]))
+        except Exception:
+            continue
+    addrs = sorted(set(addrs))
+
     now = datetime.now(timezone.utc)
+
+    # Списки батчей
+    latest_rows_map: dict[int, tuple] = {}   # addr → tuple (last wins)
     history_batch: list[tuple] = []
+    event_rows: list[tuple] = []            # tuples for db.insert_event_batch
 
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             await db.upsert_object(conn, router_sn)
             await db.upsert_equipment(conn, router_sn, equip_type, panel_id)
 
+            # 1) Забираем prev/latest state и catalog одним запросом
+            prev_map = await db.get_latest_state_rows_many(conn, router_sn, equip_type, panel_id, addrs)
+            catalog_map = await db.get_register_catalog_rows_many(conn, equip_type, addrs)
+
+            # 2) Проходим по регистрам и считаем решения
             for reg in registers:
-                await _process_register(
-                    conn, cfg, router_sn, equip_type, panel_id,
-                    reg, ts, now, history_batch,
+                await _process_register_batched(
+                    conn,
+                    cfg,
+                    router_sn,
+                    equip_type,
+                    panel_id,
+                    reg,
+                    ts,
+                    now,
+                    prev_map,
+                    catalog_map,
+                    latest_rows_map,
+                    history_batch,
+                    event_rows,
                 )
 
+            # 3) Батч-записи в БД
+            if latest_rows_map:
+                await db.upsert_latest_state_batch(conn, list(latest_rows_map.values()))
             if history_batch:
                 await db.insert_history_batch(conn, history_batch)
+            if event_rows:
+                await db.insert_event_batch(conn, event_rows)
 
     logger.debug(
-        "Decoded %s/pcc/%d: %d regs, %d history writes",
-        router_sn, panel_id, len(registers), len(history_batch),
+        "Decoded %s/pcc/%d: %d regs, latest=%d, history=%d, events=%d",
+        router_sn,
+        panel_id,
+        len(registers),
+        len(latest_rows_map),
+        len(history_batch),
+        len(event_rows),
     )
 
 
-async def _process_register(
+async def _process_register_batched(
     conn: asyncpg.Connection,
     cfg: AppConfig,
     router_sn: str,
@@ -235,7 +294,11 @@ async def _process_register(
     reg: dict[str, Any],
     ts: datetime | None,
     now: datetime,
+    prev_map: dict[int, asyncpg.Record],
+    catalog_map: dict[int, asyncpg.Record],
+    latest_rows_map: dict[int, tuple],
     history_batch: list[tuple],
+    event_rows: list[tuple],
 ) -> None:
     try:
         addr = int(reg["addr"])
@@ -256,34 +319,44 @@ async def _process_register(
         try:
             dec_value = Decimal(str(value))
         except (InvalidOperation, TypeError, ValueError):
-            # Не числовое значение — сохраняем как text, value=null
             if text is None:
                 text = str(value)
             dec_value = None
 
-    # --- Получаем предыдущее состояние ---
-    prev = await db.get_latest_state_row(conn, router_sn, equip_type, panel_id, addr)
+    prev = prev_map.get(addr)
 
-    # --- Upsert latest_state ---
-    await db.upsert_latest_state(
-        conn, router_sn, equip_type, panel_id, addr,
-        ts, dec_value, raw_val, text, unit, name, reason,
+    # --- Сохраняем latest_state (batched) ---
+    latest_rows_map[addr] = (
+        router_sn,
+        equip_type,
+        panel_id,
+        addr,
+        ts,
+        dec_value,
+        raw_val,
+        text,
+        unit,
+        name,
+        reason,
     )
 
     # --- Event: unknown register ---
     if reason and "Неизвестный регистр" in reason:
         if cfg.events_policy.enable_unknown_register_events:
-            await db.insert_event(
-                conn, router_sn,
-                "unknown_register",
-                description=f"addr={addr} reason={reason}",
-                equip_type=equip_type,
-                panel_id=panel_id,
-                payload={"addr": addr, "reason": reason},
+            payload_json = json.dumps({"addr": addr, "reason": reason}, ensure_ascii=False)
+            event_rows.append(
+                (
+                    router_sn,
+                    equip_type,
+                    panel_id,
+                    "unknown_register",
+                    f"addr={addr} reason={reason}",
+                    payload_json,
+                )
             )
 
     # --- History decision ---
-    catalog_row = await db.get_register_catalog_row(conn, equip_type, addr)
+    catalog_row = catalog_map.get(addr)
     params = resolve_params(cfg, addr, catalog_row)
 
     key = (router_sn, equip_type, panel_id, addr)
@@ -304,10 +377,20 @@ async def _process_register(
     )
 
     if decision.write:
-        history_batch.append((
-            router_sn, equip_type, panel_id, addr,
-            ts, dec_value, raw_val, text, reason, decision.write_reason,
-        ))
+        history_batch.append(
+            (
+                router_sn,
+                equip_type,
+                panel_id,
+                addr,
+                ts,
+                dec_value,
+                raw_val,
+                text,
+                reason,
+                decision.write_reason,
+            )
+        )
         _last_history_ts[key] = now
 
 
