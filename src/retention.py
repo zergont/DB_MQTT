@@ -14,7 +14,10 @@ logger = logging.getLogger("cg.retention")
 
 
 async def retention_loop(cfg: RetentionCfg) -> None:
-    """Запускает очистку с интервалом cfg.cleanup_interval_hours."""
+    """Запускает очистку с интервалом cfg.cleanup_interval_hours.
+
+    Первая очистка выполняется сразу при старте, чтобы после рестарта не ждать весь интервал.
+    """
     interval_sec = cfg.cleanup_interval_hours * 3600
     logger.info(
         "Retention task started: interval=%dh, gps_raw=%dh, history=%dd, events=%dd",
@@ -25,11 +28,14 @@ async def retention_loop(cfg: RetentionCfg) -> None:
     )
 
     while True:
-        await asyncio.sleep(interval_sec)
         try:
             await _do_cleanup(cfg)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Retention cleanup error")
+
+        await asyncio.sleep(interval_sec)
 
 
 async def _do_cleanup(cfg: RetentionCfg) -> None:

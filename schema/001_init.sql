@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS idx_history_key_ts
     ON history (router_sn, equip_type, panel_id, addr, ts DESC);
 
+CREATE INDEX IF NOT EXISTS idx_history_received_at
+    ON history (received_at);
+
 -- 4) События -----------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS events (

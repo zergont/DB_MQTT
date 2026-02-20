@@ -33,7 +33,7 @@
 ### Быстрая установка (Ubuntu, один скрипт)
 
 ```bash
-git clone <REPO_URL> /opt/cg-db-writer
+git clone https://github.com/zergont/DB_MQTT.git /opt/cg-db-writer
 cd /opt/cg-db-writer
 sudo chmod +x scripts/install.sh
 sudo ./scripts/install.sh
@@ -48,7 +48,7 @@ sudo ./scripts/install.sh
 
 ```bash
 cd /opt
-git clone <REPO_URL> cg-db-writer
+git clone https://github.com/zergont/DB_MQTT.git cg-db-writer
 cd cg-db-writer
 
 python3.13 -m venv venv
@@ -137,7 +137,9 @@ sudo useradd -r -s /usr/sbin/nologin cg 2>/dev/null || true
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now cg-db-writer.service
-sudo systemctl enable --now cg-db-writer-cleanup.timer
+
+# (Опционально) Если хотите вынести очистку в systemd timer:
+# sudo systemctl enable --now cg-db-writer-cleanup.timer
 ```
 
 Проверка:
@@ -331,7 +333,7 @@ ORDER BY created_at DESC LIMIT 10;
 python -m src --config config.yml --cleanup
 ```
 
-**Или через systemd timer:**
+**(Опционально) через systemd timer (если вы его включили):**
 ```bash
 sudo systemctl start cg-db-writer-cleanup.service
 sudo journalctl -u cg-db-writer-cleanup -n 20

@@ -322,6 +322,7 @@ async def cleanup_gps_raw(conn: asyncpg.Connection, hours: int, batch: int) -> i
             WHERE id IN (
                 SELECT id FROM gps_raw_history
                 WHERE received_at < now() - make_interval(hours => $1)
+                ORDER BY id
                 LIMIT $2
             )
             """,
@@ -344,6 +345,7 @@ async def cleanup_history(conn: asyncpg.Connection, days: int, batch: int) -> in
             WHERE id IN (
                 SELECT id FROM history
                 WHERE received_at < now() - make_interval(days => $1)
+                ORDER BY id
                 LIMIT $2
             )
             """,
@@ -366,6 +368,7 @@ async def cleanup_events(conn: asyncpg.Connection, days: int, batch: int) -> int
             WHERE id IN (
                 SELECT id FROM events
                 WHERE created_at < now() - make_interval(days => $1)
+                ORDER BY id
                 LIMIT $2
             )
             """,

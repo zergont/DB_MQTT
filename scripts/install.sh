@@ -14,7 +14,7 @@
 #   5) Подсказывает следующие шаги
 # =============================================================================
 
-set -e
+set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="/opt/cg-db-writer"
@@ -28,20 +28,33 @@ echo ""
 # --- 1) Проверки ---
 echo "[1/5] Проверка зависимостей..."
 
-if ! command -v python3.13 &> /dev/null; then
-    if command -v python3 &> /dev/null; then
-        PY=$(python3 --version 2>&1)
-        echo "  python3.13 не найден, но есть: $PY"
-        echo "  Если версия >= 3.13, создайте ссылку:"
-        echo "    sudo ln -s \$(which python3) /usr/local/bin/python3.13"
+# Требуем Python 3.13+ (можно как python3.13, так и python3 нужной версии)
+PYTHON_BIN=""
+if command -v python3.13 &> /dev/null; then
+    PYTHON_BIN="python3.13"
+elif command -v python3 &> /dev/null; then
+    # Проверяем версию python3
+    if python3 - <<'PY'
+import sys
+ok = (sys.version_info.major, sys.version_info.minor) >= (3, 13)
+raise SystemExit(0 if ok else 1)
+PY
+    then
+        PYTHON_BIN="python3"
     else
-        echo "  ОШИБКА: Python 3.13+ не найден"
-        echo "  Установите: sudo apt install python3.13 python3.13-venv"
+        echo "  ОШИБКА: найден python3, но версия ниже 3.13:"
+        python3 --version || true
+        echo "  Установите Python 3.13+ (и пакет venv) и повторите установку."
+        echo "  Пример (если у вас доступен пакет): sudo apt install python3.13 python3.13-venv"
         exit 1
     fi
 else
-    echo "  Python: $(python3.13 --version)"
+    echo "  ОШИБКА: Python не найден"
+    echo "  Установите Python 3.13+ (и пакет venv) и повторите установку."
+    exit 1
 fi
+
+echo "  Python: $($PYTHON_BIN --version)"
 
 if ! command -v psql &> /dev/null; then
     echo "  ПРЕДУПРЕЖДЕНИЕ: psql не найден (PostgreSQL client)"
@@ -68,10 +81,8 @@ fi
 echo ""
 echo "[3/5] Создание venv и установка зависимостей..."
 
-PYTHON_BIN="python3.13"
-if ! command -v python3.13 &> /dev/null; then
-    PYTHON_BIN="python3"
-fi
+PYTHON_BIN="${PYTHON_BIN:-python3.13}"
+
 
 cd "$INSTALL_DIR"
 if [ ! -d "venv" ]; then
@@ -140,8 +151,10 @@ echo "     venv/bin/python scripts/check_health.py --config config.yml"
 echo ""
 echo "  5) Запустите сервис:"
 echo "     sudo systemctl enable --now cg-db-writer"
+echo ""
+echo "  6) (Опционально) Вынесите очистку в systemd timer:"
 echo "     sudo systemctl enable --now cg-db-writer-cleanup.timer"
 echo ""
-echo "  6) Проверьте логи:"
+echo "  7) Проверьте логи:"
 echo "     sudo journalctl -u cg-db-writer -f"
 echo ""
