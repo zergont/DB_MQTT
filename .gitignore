@@ -26,3 +26,4 @@ config.yml
 # OS
 .DS_Store
 Thumbs.db
+/DB_MQTT.pyproj
