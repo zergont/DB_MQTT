@@ -7,7 +7,7 @@
 #   sudo ./scripts/install.sh
 #
 # Что делает:
-#   1) Проверяет Python 3.13+ и PostgreSQL
+#   1) Проверяет Python 3.10+ и PostgreSQL
 #   2) Создаёт venv и ставит зависимости
 #   3) Копирует config.example.yml → config.yml (если нет)
 #   4) Устанавливает systemd unit-файлы
@@ -28,29 +28,26 @@ echo ""
 # --- 1) Проверки ---
 echo "[1/5] Проверка зависимостей..."
 
-# Требуем Python 3.13+ (можно как python3.13, так и python3 нужной версии)
+# Требуем Python 3.10+ (можно как python3.12, python3.13, так и python3 нужной версии)
 PYTHON_BIN=""
-if command -v python3.13 &> /dev/null; then
-    PYTHON_BIN="python3.13"
-elif command -v python3 &> /dev/null; then
-    # Проверяем версию python3
-    if python3 - <<'PY'
+for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$candidate" &> /dev/null; then
+        if "$candidate" - <<'PY'
 import sys
-ok = (sys.version_info.major, sys.version_info.minor) >= (3, 13)
+ok = (sys.version_info.major, sys.version_info.minor) >= (3, 10)
 raise SystemExit(0 if ok else 1)
 PY
-    then
-        PYTHON_BIN="python3"
-    else
-        echo "  ОШИБКА: найден python3, но версия ниже 3.13:"
-        python3 --version || true
-        echo "  Установите Python 3.13+ (и пакет venv) и повторите установку."
-        echo "  Пример (если у вас доступен пакет): sudo apt install python3.13 python3.13-venv"
-        exit 1
+        then
+            PYTHON_BIN="$candidate"
+            break
+        fi
     fi
-else
-    echo "  ОШИБКА: Python не найден"
-    echo "  Установите Python 3.13+ (и пакет venv) и повторите установку."
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+    echo "  ОШИБКА: Python 3.10+ не найден"
+    python3 --version 2>/dev/null || true
+    echo "  Установите Python 3.10+ (и пакет venv) и повторите установку."
     exit 1
 fi
 
@@ -81,7 +78,7 @@ fi
 echo ""
 echo "[3/5] Создание venv и установка зависимостей..."
 
-PYTHON_BIN="${PYTHON_BIN:-python3.13}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 
 cd "$INSTALL_DIR"

@@ -22,7 +22,7 @@
 ## Требования
 
 - **OS:** Ubuntu 22.04 / 24.04
-- **Python:** 3.13+
+- **Python:** 3.10+
 - **PostgreSQL:** 14+
 - **MQTT-брокер:** Mosquitto или совместимый (доступ по сети)
 
@@ -33,8 +33,8 @@
 ### Быстрая установка (Ubuntu, один скрипт)
 
 ```bash
-git clone https://github.com/zergont/DB_MQTT.git /home/db-writer
-cd /home/db-writer
+git clone https://github.com/zergont/DB_MQTT.git ~/db-writer
+cd ~/db-writer
 chmod +x scripts/install.sh
 sudo ./scripts/install.sh
 ```
@@ -47,10 +47,10 @@ sudo ./scripts/install.sh
 #### 1. Клонировать и настроить
 
 ```bash
-git clone https://github.com/zergont/DB_MQTT.git /home/db-writer
-cd /home/db-writer
+git clone https://github.com/zergont/DB_MQTT.git ~/db-writer
+cd ~/db-writer
 
-python3.13 -m venv venv
+python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
@@ -128,7 +128,12 @@ python -m src --config config.yml
 
 #### 5. Запуск как systemd service (production)
 
+Перед копированием unit-файлов проверьте пути внутри — они должны совпадать
+с реальным расположением проекта (по умолчанию `/home/<user>/db-writer`):
 ```bash
+# Подставить ваш абсолютный путь (~ в systemd не работает)
+sed -i "s|/home/db-writer|$HOME/db-writer|g" systemd/*.service
+
 sudo cp systemd/cg-db-writer.service /etc/systemd/system/
 sudo cp systemd/cg-db-writer-cleanup.service /etc/systemd/system/
 sudo cp systemd/cg-db-writer-cleanup.timer /etc/systemd/system/
