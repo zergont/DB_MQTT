@@ -7,8 +7,8 @@ Wants=postgresql.service
 Type=simple
 User=cg
 Group=cg
-WorkingDirectory=/opt/cg-db-writer
-ExecStart=/opt/cg-db-writer/venv/bin/python -m src --config /opt/cg-db-writer/config.yml
+WorkingDirectory=/home/db-writer
+ExecStart=/home/db-writer/venv/bin/python -m src --config /home/db-writer/config.yml
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -17,7 +17,7 @@ StandardError=journal
 # Безопасность
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=true
+ProtectHome=false
 
 [Install]
 WantedBy=multi-user.target

@@ -17,7 +17,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-INSTALL_DIR="/opt/cg-db-writer"
+INSTALL_DIR="/home/db-writer"
 SERVICE_USER="cg"
 
 echo "============================================="

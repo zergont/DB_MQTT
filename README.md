@@ -33,9 +33,9 @@
 ### Быстрая установка (Ubuntu, один скрипт)
 
 ```bash
-git clone https://github.com/zergont/DB_MQTT.git /opt/cg-db-writer
-cd /opt/cg-db-writer
-sudo chmod +x scripts/install.sh
+git clone https://github.com/zergont/DB_MQTT.git /home/db-writer
+cd /home/db-writer
+chmod +x scripts/install.sh
 sudo ./scripts/install.sh
 ```
 
@@ -47,9 +47,8 @@ sudo ./scripts/install.sh
 #### 1. Клонировать и настроить
 
 ```bash
-cd /opt
-git clone https://github.com/zergont/DB_MQTT.git cg-db-writer
-cd cg-db-writer
+git clone https://github.com/zergont/DB_MQTT.git /home/db-writer
+cd /home/db-writer
 
 python3.13 -m venv venv
 source venv/bin/activate
