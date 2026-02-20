@@ -1,6 +1,7 @@
 [Unit]
 Description=CG DB-Writer — Retention cleanup (oneshot)
 After=postgresql.service
+Wants=postgresql.service
 
 [Service]
 Type=oneshot

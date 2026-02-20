@@ -1,15 +1,26 @@
-###############################################################################
-# Line endings: keep repo files in LF to avoid /usr/bin/env^M issues on Ubuntu.
-###############################################################################
-* text=auto
+# Enforce LF in the repository (Ubuntu deployment)
+* text=auto eol=lf
 
-# Force LF for runtime / config / docs
-*.py       text eol=lf
-*.sh       text eol=lf
-*.yml      text eol=lf
-*.yaml     text eol=lf
-*.sql      text eol=lf
-*.md       text eol=lf
-*.service  text eol=lf
-*.timer    text eol=lf
-.gitignore text eol=lf
+# Explicit text types
+*.py      text eol=lf
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.sql     text eol=lf
+*.md      text eol=lf
+*.service text eol=lf
+*.timer   text eol=lf
+*.ps1     text eol=lf
+
+# If you have Windows batch files (optional)
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# Binary files
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary

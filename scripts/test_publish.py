@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""
-Тестовый скрипт: публикует GPS и decoded сообщения в MQTT для проверки DB-Writer.
+"""Тестовый скрипт: публикует GPS и decoded сообщения в MQTT для проверки DB-Writer.
 
-Требует:  pip install paho-mqtt
+Требует:
+  pip install paho-mqtt
 
 Использование:
-    python scripts/test_publish.py --host localhost --port 1883
-
-Скрипт отправляет:
-  1) Нормальную GPS точку
-  2) Телепорт-GPS (должна быть rejected)
-  3) Decoded с 3 регистрами (один normal, один NA, один unknown)
+  python scripts/test_publish.py --host localhost --port 1883 --sn TEST001
 """
 
 import argparse
@@ -20,7 +15,7 @@ import time
 import paho.mqtt.client as mqtt
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", type=int, default=1883)
@@ -32,13 +27,13 @@ def main():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="cg-test-pub")
     if args.user:
         client.username_pw_set(args.user, args.password)
+
     client.connect(args.host, args.port, 60)
 
     sn = args.sn
     topic_gps = f"cg/v1/telemetry/SN/{sn}"
     topic_dec = f"cg/v1/decoded/SN/{sn}/pcc/1"
 
-    # --- 1) GPS нормальная точка ---
     gps1 = {
         "GPS": {
             "latitude": 59.851624,
@@ -49,11 +44,10 @@ def main():
             "date_iso_8601": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
     }
-    client.publish(topic_gps, json.dumps(gps1))
-    print(f"[1/4] GPS normal  → {topic_gps}")
+    client.publish(topic_gps, json.dumps(gps1, ensure_ascii=False))
+    print(f"[1/4] GPS normal → {topic_gps}")
     time.sleep(1)
 
-    # --- 2) GPS телепорт (далеко) ---
     gps2 = {
         "GPS": {
             "latitude": 55.751244,
@@ -64,11 +58,10 @@ def main():
             "date_iso_8601": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
     }
-    client.publish(topic_gps, json.dumps(gps2))
-    print(f"[2/4] GPS teleport → {topic_gps}  (expect rejected)")
+    client.publish(topic_gps, json.dumps(gps2, ensure_ascii=False))
+    print(f"[2/4] GPS teleport → {topic_gps} (expect rejected)")
     time.sleep(1)
 
-    # --- 3) Decoded — нормальные регистры + NA + unknown ---
     decoded = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "router_sn": sn,
@@ -103,17 +96,16 @@ def main():
             },
         ],
     }
-    client.publish(topic_dec, json.dumps(decoded))
+    client.publish(topic_dec, json.dumps(decoded, ensure_ascii=False))
     print(f"[3/4] Decoded 3 regs → {topic_dec}")
     time.sleep(1)
 
-    # --- 4) Decoded — повторная отправка того же (проверка deadband/min_interval) ---
     decoded["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    client.publish(topic_dec, json.dumps(decoded))
-    print(f"[4/4] Decoded repeat → {topic_dec}  (expect no history change)")
+    client.publish(topic_dec, json.dumps(decoded, ensure_ascii=False))
+    print(f"[4/4] Decoded repeat → {topic_dec} (expect no history change)")
 
     client.disconnect()
-    print("\nDone. Check DB tables.")
+    print("\nDone.\nCheck DB tables.")
 
 
 if __name__ == "__main__":
