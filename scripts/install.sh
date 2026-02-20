@@ -7,11 +7,11 @@
 #   sudo ./scripts/install.sh
 #
 # Что делает:
-#   1) Проверяет Python 3.10+ и PostgreSQL
-#   2) Создаёт venv и ставит зависимости
-#   3) Копирует config.example.yml → config.yml (если нет)
-#   4) Устанавливает systemd unit-файлы
-#   5) Подсказывает следующие шаги
+#   1) Проверяет Python 3.10+
+#   2) Устанавливает PostgreSQL (если нет) и создаёт БД/пользователя
+#   3) Создаёт venv и ставит зависимости
+#   4) Копирует config.example.yml → config.yml (если нет)
+#   5) Устанавливает systemd unit-файлы
 # =============================================================================
 
 set -euo pipefail
@@ -54,8 +54,41 @@ fi
 echo "  Python: $($PYTHON_BIN --version)"
 
 if ! command -v psql &> /dev/null; then
-    echo "  ПРЕДУПРЕЖДЕНИЕ: psql не найден (PostgreSQL client)"
-    echo "  Установите: sudo apt install postgresql-client"
+    echo "  PostgreSQL не найден — устанавливаю..."
+    apt-get update -qq
+    apt-get install -y -qq postgresql postgresql-client > /dev/null
+    systemctl enable --now postgresql
+    echo "  PostgreSQL установлен и запущен"
+else
+    echo "  PostgreSQL: $(psql --version | head -1)"
+    # Убедимся что сервер запущен
+    if ! systemctl is-active --quiet postgresql 2>/dev/null; then
+        systemctl start postgresql
+        echo "  PostgreSQL сервер запущен"
+    fi
+fi
+
+# --- 1b) Создание БД и пользователя (если ещё нет) ---
+PG_USER="cg_writer"
+PG_DB="cg_telemetry"
+PG_PASS_NEW=""
+
+# Проверяем существует ли пользователь
+if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'" 2>/dev/null | grep -q 1; then
+    echo "  PG пользователь '$PG_USER' уже существует"
+else
+    PG_PASS_NEW="cg_$(head -c 12 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 12)"
+    sudo -u postgres psql -c "CREATE USER $PG_USER WITH PASSWORD '$PG_PASS_NEW';" > /dev/null 2>&1
+    echo "  PG пользователь '$PG_USER' создан (пароль: $PG_PASS_NEW)"
+    echo "  ⚠ ЗАПОМНИТЕ ПАРОЛЬ — он понадобится для config.yml"
+fi
+
+# Проверяем существует ли БД
+if sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$PG_DB'" 2>/dev/null | grep -q 1; then
+    echo "  БД '$PG_DB' уже существует"
+else
+    sudo -u postgres psql -c "CREATE DATABASE $PG_DB OWNER $PG_USER;" > /dev/null 2>&1
+    echo "  БД '$PG_DB' создана (owner: $PG_USER)"
 fi
 
 # --- 2) Установка файлов ---
@@ -99,10 +132,30 @@ echo "[4/5] Конфигурация..."
 
 if [ ! -f "$INSTALL_DIR/config.yml" ]; then
     cp "$INSTALL_DIR/config.example.yml" "$INSTALL_DIR/config.yml"
-    echo "  Создан config.yml (ЗАПОЛНИТЕ секреты: mqtt, postgres)"
+    # Автозаполнение postgres секции если пользователь был только что создан
+    if [ -n "${PG_PASS_NEW:-}" ]; then
+        # Заменяем только в postgres секции (вторые вхождения user/password)
+        sed -i '/^postgres:/,/^[^ ]/ {
+            s|^  user: "".*|  user: "'"$PG_USER"'"|
+            s|^  password: "".*|  password: "'"$PG_PASS_NEW"'"|
+        }' "$INSTALL_DIR/config.yml"
+        echo "  Создан config.yml (postgres секция заполнена автоматически)"
+    else
+        echo "  Создан config.yml (ЗАПОЛНИТЕ секреты: mqtt, postgres)"
+    fi
     echo "  Редактировать: nano $INSTALL_DIR/config.yml"
 else
     echo "  config.yml уже существует"
+fi
+
+# Применяем SQL схему автоматически
+echo ""
+echo "  Применяю SQL схему..."
+if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$INSTALL_DIR/config.yml" > /dev/null 2>&1; then
+    echo "  Схема применена"
+else
+    echo "  ⚠ Не удалось применить схему (проверьте config.yml и запустите вручную)"
+    echo "    cd $INSTALL_DIR && venv/bin/python scripts/setup_db.py --config config.yml"
 fi
 
 # --- 5) Системный пользователь и systemd ---
@@ -130,28 +183,16 @@ echo "============================================="
 echo ""
 echo "Следующие шаги:"
 echo ""
-echo "  1) Заполните config.yml:"
+echo "  1) Проверьте/дополните config.yml (mqtt секция):"
 echo "     nano $INSTALL_DIR/config.yml"
 echo ""
-echo "  2) Создайте БД PostgreSQL (если ещё нет):"
-echo "     sudo -u postgres psql"
-echo "     CREATE USER cg_writer WITH PASSWORD 'your_password';"
-echo "     CREATE DATABASE cg_telemetry OWNER cg_writer;"
-echo "     \\q"
-echo ""
-echo "  3) Примените схему:"
+echo "  2) Проверьте подключения:"
 echo "     cd $INSTALL_DIR"
-echo "     venv/bin/python scripts/setup_db.py --config config.yml"
-echo ""
-echo "  4) Проверьте подключения:"
 echo "     venv/bin/python scripts/check_health.py --config config.yml"
 echo ""
-echo "  5) Запустите сервис:"
+echo "  3) Запустите сервис:"
 echo "     sudo systemctl enable --now cg-db-writer"
 echo ""
-echo "  6) (Опционально) Вынесите очистку в systemd timer:"
-echo "     sudo systemctl enable --now cg-db-writer-cleanup.timer"
-echo ""
-echo "  7) Проверьте логи:"
+echo "  4) Проверьте логи:"
 echo "     sudo journalctl -u cg-db-writer -f"
 echo ""
