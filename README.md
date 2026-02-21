@@ -39,8 +39,9 @@ chmod +x scripts/install.sh
 sudo ./scripts/install.sh
 ```
 
-Скрипт создаст venv, установит зависимости, скопирует systemd unit-файлы.  
-После этого нужно выполнить шаги 1–3 ниже.
+Скрипт автоматически: установит PostgreSQL (если нет), создаст БД и пользователя,
+настроит venv, заполнит config.yml и применит SQL-схему.  
+После установки останется только прописать MQTT-хост в config.yml и запустить сервис.
 
 ### Пошаговая установка (вручную)
 
@@ -60,25 +61,26 @@ nano config.yml    # ← заполнить mqtt и postgres секции
 
 #### 2. Подготовить PostgreSQL
 
+Если PostgreSQL уже установлен — создать пользователя и БД:
 ```bash
-sudo -u postgres psql
-```
-```sql
-CREATE USER cg_writer WITH PASSWORD 'your_password';
-CREATE DATABASE cg_telemetry OWNER cg_writer;
-\q
+sudo -u postgres psql -c "CREATE USER cg_writer WITH PASSWORD 'your_password';"
+sudo -u postgres psql -c "CREATE DATABASE cg_telemetry OWNER cg_writer;"
 ```
 
-Применить схему — **автоматически через скрипт:**
+Если PostgreSQL не установлен:
+```bash
+sudo apt install -y postgresql postgresql-client
+sudo systemctl enable --now postgresql
+```
+Затем создать пользователя и БД командами выше.
+
+Применить схему:
 ```bash
 source venv/bin/activate
 python scripts/setup_db.py --config config.yml
 ```
 
-Или вручную:
-```bash
-PGPASSWORD=your_password psql -h localhost -U cg_writer -d cg_telemetry -f schema/001_init.sql
-```
+> **Примечание:** `sudo ./scripts/install.sh` выполняет все эти шаги автоматически.
 
 #### 3. Проверить подключения
 

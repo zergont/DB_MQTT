@@ -26,7 +26,7 @@ echo "============================================="
 echo ""
 
 # --- 1) Проверки ---
-echo "[1/5] Проверка зависимостей..."
+echo "[1/6] Проверка зависимостей..."
 
 # Требуем Python 3.10+ (можно как python3.12, python3.13, так и python3 нужной версии)
 PYTHON_BIN=""
@@ -71,16 +71,14 @@ fi
 # --- 1b) Создание БД и пользователя (если ещё нет) ---
 PG_USER="cg_writer"
 PG_DB="cg_telemetry"
-PG_PASS_NEW=""
+PG_PASS="cg_writer"
 
 # Проверяем существует ли пользователь
 if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'" 2>/dev/null | grep -q 1; then
     echo "  PG пользователь '$PG_USER' уже существует"
 else
-    PG_PASS_NEW="cg_$(head -c 12 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 12)"
-    sudo -u postgres psql -c "CREATE USER $PG_USER WITH PASSWORD '$PG_PASS_NEW';" > /dev/null 2>&1
-    echo "  PG пользователь '$PG_USER' создан (пароль: $PG_PASS_NEW)"
-    echo "  ⚠ ЗАПОМНИТЕ ПАРОЛЬ — он понадобится для config.yml"
+    sudo -u postgres psql -c "CREATE USER $PG_USER WITH PASSWORD '$PG_PASS';" > /dev/null 2>&1
+    echo "  PG пользователь '$PG_USER' создан (пароль: $PG_PASS)"
 fi
 
 # Проверяем существует ли БД
@@ -93,7 +91,7 @@ fi
 
 # --- 2) Установка файлов ---
 echo ""
-echo "[2/5] Копирование файлов в $INSTALL_DIR..."
+echo "[2/6] Копирование файлов в $INSTALL_DIR..."
 
 if [ "$REPO_DIR" != "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
@@ -109,7 +107,7 @@ fi
 
 # --- 3) Virtual environment ---
 echo ""
-echo "[3/5] Создание venv и установка зависимостей..."
+echo "[3/6] Создание venv и установка зависимостей..."
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
@@ -128,28 +126,17 @@ echo "  Зависимости установлены"
 
 # --- 4) Config ---
 echo ""
-echo "[4/5] Конфигурация..."
+echo "[4/6] Конфигурация..."
 
 if [ ! -f "$INSTALL_DIR/config.yml" ]; then
     cp "$INSTALL_DIR/config.example.yml" "$INSTALL_DIR/config.yml"
-    # Автозаполнение postgres секции если пользователь был только что создан
-    if [ -n "${PG_PASS_NEW:-}" ]; then
-        # Заменяем только в postgres секции (вторые вхождения user/password)
-        sed -i '/^postgres:/,/^[^ ]/ {
-            s|^  user: "".*|  user: "'"$PG_USER"'"|
-            s|^  password: "".*|  password: "'"$PG_PASS_NEW"'"|
-        }' "$INSTALL_DIR/config.yml"
-        echo "  Создан config.yml (postgres секция заполнена автоматически)"
-    else
-        echo "  Создан config.yml (ЗАПОЛНИТЕ секреты: mqtt, postgres)"
-    fi
-    echo "  Редактировать: nano $INSTALL_DIR/config.yml"
+    echo "  Создан config.yml (postgres: cg_writer/cg_writer)"
+    echo "  MQTT секция — заполните при необходимости: nano $INSTALL_DIR/config.yml"
 else
     echo "  config.yml уже существует"
 fi
 
 # Применяем SQL схему автоматически
-echo ""
 echo "  Применяю SQL схему..."
 if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$INSTALL_DIR/config.yml" > /dev/null 2>&1; then
     echo "  Схема применена"
@@ -160,7 +147,7 @@ fi
 
 # --- 5) Системный пользователь и systemd ---
 echo ""
-echo "[5/5] Systemd..."
+echo "[5/6] Systemd..."
 
 if ! id "$SERVICE_USER" &> /dev/null; then
     useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
@@ -173,7 +160,34 @@ cp "$REPO_DIR/systemd/cg-db-writer.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/cg-db-writer-cleanup.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/cg-db-writer-cleanup.timer" /etc/systemd/system/
 systemctl daemon-reload
-echo "  Systemd unit-файлы установлены"
+systemctl enable cg-db-writer
+echo "  Systemd unit-файлы установлены, автозапуск включён"
+
+# Запускаем / перезапускаем сервис
+systemctl restart cg-db-writer
+echo "  Сервис cg-db-writer запущен"
+
+# --- 6) Проверка ---
+echo ""
+echo "[6/6] Проверка..."
+sleep 2
+
+if systemctl is-active --quiet cg-db-writer; then
+    echo "  ✓ cg-db-writer: active (running)"
+else
+    echo "  ✗ cg-db-writer: не запустился"
+    echo "    Проверьте логи: sudo journalctl -u cg-db-writer -n 20"
+fi
+
+# Health check
+if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/check_health.py" --config "$INSTALL_DIR/config.yml" > /tmp/cg-health-check.txt 2>&1; then
+    echo "  ✓ PostgreSQL: OK"
+    echo "  ✓ MQTT: OK"
+else
+    echo "  ⚠ Health check — есть проблемы:"
+    cat /tmp/cg-health-check.txt | grep -E 'ОШИБКА|OK' | sed 's/^/    /'
+fi
+rm -f /tmp/cg-health-check.txt
 
 # --- Итого ---
 echo ""
@@ -181,18 +195,7 @@ echo "============================================="
 echo "  Установка завершена!"
 echo "============================================="
 echo ""
-echo "Следующие шаги:"
-echo ""
-echo "  1) Проверьте/дополните config.yml (mqtt секция):"
-echo "     nano $INSTALL_DIR/config.yml"
-echo ""
-echo "  2) Проверьте подключения:"
-echo "     cd $INSTALL_DIR"
-echo "     venv/bin/python scripts/check_health.py --config config.yml"
-echo ""
-echo "  3) Запустите сервис:"
-echo "     sudo systemctl enable --now cg-db-writer"
-echo ""
-echo "  4) Проверьте логи:"
-echo "     sudo journalctl -u cg-db-writer -f"
+echo "  Конфиг:  $INSTALL_DIR/config.yml"
+echo "  Логи:    sudo journalctl -u cg-db-writer -f"
+echo "  Статус:  sudo systemctl status cg-db-writer"
 echo ""

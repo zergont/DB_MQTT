@@ -23,8 +23,8 @@ postgres:
   host: "localhost"
   port: 5432
   dbname: "cg_telemetry"
-  user: ""        # заполнить
-  password: ""    # заполнить
+  user: "cg_writer"
+  password: "cg_writer"
   pool_min: 2
   pool_max: 10
 
