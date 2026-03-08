@@ -63,15 +63,15 @@ class IngestCfg:
     telemetry_queue_maxsize:
         Очередь GPS/telemetry (маленький поток, но важный).
     worker_count:
-        Кол-во DB-воркеров. Для стабильности по умолчанию 1 (без гонок по кэшам).
+        Кол-во DB-воркеров. По умолчанию 2 для лучшей обработки burst-нагрузки.
         Можно увеличить до 2-4 при достаточном pool_max и CPU.
     drop_decoded_when_full:
         Если decoded очередь переполнена — выбрасывать данные вместо блокировки MQTT loop.
         Для надёжности "в реальном времени" обычно лучше drop_oldest, чем зависание.
     """
     decoded_queue_maxsize: int = 5000
-    telemetry_queue_maxsize: int = 200
-    worker_count: int = 1
+    telemetry_queue_maxsize: int = 500
+    worker_count: int = 2
 
     # При переполнении decoded очереди:
     drop_decoded_when_full: bool = True
@@ -141,6 +141,12 @@ class LoggingCfg:
     json_logs: bool = False
 
 @dataclass
+class HealthCfg:
+    enabled: bool = True
+    port: int = 8765
+    bind: str = "127.0.0.1"
+
+@dataclass
 class AppConfig:
     mqtt: MqttCfg = field(default_factory=MqttCfg)
     postgres: PostgresCfg = field(default_factory=PostgresCfg)
@@ -150,6 +156,7 @@ class AppConfig:
     events_policy: EventsPolicyCfg = field(default_factory=EventsPolicyCfg)
     retention: RetentionCfg = field(default_factory=RetentionCfg)
     logging: LoggingCfg = field(default_factory=LoggingCfg)
+    health: HealthCfg = field(default_factory=HealthCfg)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +211,7 @@ def load_config(path: str | Path) -> AppConfig:
         events_policy=_merge(EventsPolicyCfg, raw.get("events_policy")),
         retention=_merge(RetentionCfg, raw.get("retention")),
         logging=_merge(LoggingCfg, raw.get("logging")),
+        health=_merge(HealthCfg, raw.get("health")),
     )
     logger.info("Config loaded from %s", p)
     return cfg

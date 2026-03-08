@@ -33,11 +33,11 @@ ingest:
   # decoded — основной поток данных (много сообщений)
   decoded_queue_maxsize: 5000
   # telemetry — GPS/объект (редко, но важно)
-  telemetry_queue_maxsize: 200
+  telemetry_queue_maxsize: 500
 
-  # DB workers: по умолчанию 1 (без гонок по внутренним кэшам).
+  # DB workers: по умолчанию 2 для лучшей обработки burst-нагрузки.
   # Если CPU/БД позволяют — 2..4, но тогда увеличьте postgres.pool_max.
-  worker_count: 1
+  worker_count: 2
 
   # Если decoded очередь переполнится:
   drop_decoded_when_full: true
@@ -92,6 +92,12 @@ retention:
   events_days: 90
   cleanup_interval_hours: 24
   batch_size: 5000
+
+# ---------- Health endpoint ---------------------------------------------------
+health:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 8765
 
 # ---------- Logging ----------------------------------------------------------
 logging:

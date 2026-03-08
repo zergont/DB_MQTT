@@ -20,6 +20,7 @@ from src import db
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
 from src.handlers import dispatch, get_gps_filter
+from src.health import HealthState, health_loop
 from src.log import setup_logging
 from src.retention import _do_cleanup, retention_loop
 from src.watchdog import watchdog_loop
@@ -201,6 +202,7 @@ async def _worker_loop(
     cfg: AppConfig,
     q_telemetry: asyncio.Queue[_IngestItem],
     q_decoded: asyncio.Queue[_IngestItem],
+    health_state: HealthState,
 ) -> None:
     """DB-воркер: вытаскивает из очередей и пишет в БД.
 
@@ -229,6 +231,7 @@ async def _worker_loop(
             while True:
                 try:
                     await dispatch(item.topic, item.payload, cfg, _last_seen, _panel_last_seen)
+                    health_state.mark_write()
                     break
                 except asyncio.CancelledError:
                     raise
@@ -267,6 +270,7 @@ async def _run(cfg: AppConfig) -> None:
     # Очереди
     q_telemetry: asyncio.Queue[_IngestItem] = asyncio.Queue(maxsize=cfg.ingest.telemetry_queue_maxsize)
     q_decoded: asyncio.Queue[_IngestItem] = asyncio.Queue(maxsize=cfg.ingest.decoded_queue_maxsize)
+    health_state = HealthState(q_decoded=q_decoded, q_telemetry=q_telemetry)
 
     try:
         await _restore_gps_state(cfg)
@@ -277,16 +281,28 @@ async def _run(cfg: AppConfig) -> None:
             asyncio.create_task(retention_loop(cfg.retention), name="retention"),
         ]
 
+        if cfg.health.enabled:
+            tasks.append(asyncio.create_task(health_loop(cfg.health, health_state), name="health_loop"))
+
         # Воркеры (DB writers)
         for i in range(max(1, int(cfg.ingest.worker_count))):
-            tasks.append(asyncio.create_task(_worker_loop(i + 1, cfg, q_telemetry, q_decoded), name=f"worker_{i+1}"))
+            tasks.append(asyncio.create_task(_worker_loop(i + 1, cfg, q_telemetry, q_decoded, health_state), name=f"worker_{i+1}"))
+
+        health_state.worker_tasks = tuple(t for t in tasks if t.get_name().startswith("worker_"))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for t in done:
-            if t.exception():
-                logger.error("Task %s failed: %s", t.get_name(), t.exception())
+        failed = [t for t in done if not t.cancelled() and t.exception() is not None]
+        for t in failed:
+            logger.error("Task %s failed: %s", t.get_name(), t.exception())
         for t in pending:
             t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if failed:
+            raise RuntimeError(f"Critical task(s) failed: {[t.get_name() for t in failed]}")
 
     finally:
         await db.close_pool()

@@ -154,6 +154,51 @@ sudo systemctl status cg-db-writer
 sudo journalctl -u cg-db-writer -f
 ```
 
+### Обновление установленного сервиса
+
+Для обновления уже установленного сервиса используйте:
+
+```bash
+chmod +x scripts/update.sh
+sudo ./scripts/update.sh
+```
+
+Скрипт:
+
+- копирует свежий код в `/home/db-writer`;
+- переустанавливает зависимости из `requirements.txt`;
+- интерактивно сравнивает `config.example.yml` и рабочий `config.yml`;
+- при расхождениях спрашивает, какое значение оставить: `old` или `new`;
+- применяет SQL-схему и перезапускает `systemd` сервис.
+
+### Настройка под burst-нагрузку
+
+При восстановлении связи роутер может прислать накопленные decoded-сообщения пачкой. Чтобы ingest не блокировал event loop, проверьте секцию `ingest` в `config.yml`:
+
+- `decoded_queue_maxsize: 5000` — буфер для burst от 1-2 роутеров.
+- `telemetry_queue_maxsize: 500` — запас для GPS и служебной телеметрии.
+- `drop_decoded_when_full: true` — не блокировать MQTT loop при переполнении очереди.
+- `drop_decoded_policy: "drop_oldest"` — сохранять самые свежие данные.
+- `worker_count: 2` — два DB-воркера для параллельной записи при всплесках.
+
+Если в логах появляется `Queue ... full; blocking put`, значит в рабочем `config.yml` остались старые значения и их нужно обновить вручную.
+
+### Health endpoint
+
+Сервис поднимает HTTP endpoint `GET /health` на `127.0.0.1:8765` по умолчанию. Параметры задаются в секции `health` файла `config.yml`:
+
+- `enabled` — включить endpoint.
+- `bind` — адрес привязки.
+- `port` — TCP-порт.
+
+Проверка:
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+Если `status=ok`, данные пишутся свежо. `degraded` означает, что записи давно не было, а `dead` — воркеры не живы или запись отсутствует слишком долго.
+
 ---
 
 ## Проверка работы
