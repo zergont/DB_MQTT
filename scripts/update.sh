@@ -80,8 +80,9 @@ else
     export CG_UPDATE_TARGET_CONFIG="$INSTALL_DIR/config.yml"
     export CG_UPDATE_EXAMPLE_CONFIG="$INSTALL_DIR/config.example.yml"
     export CG_UPDATE_MERGED_CONFIG="$TMP_DIR/config.merged.yml"
+    export CG_UPDATE_TTY="/dev/tty"
 
-    "$INSTALL_DIR/venv/bin/python" <<'PY'
+    "$INSTALL_DIR/venv/bin/python" -c '
 from __future__ import annotations
 
 import os
@@ -96,6 +97,14 @@ import yaml
 target_path = Path(os.environ["CG_UPDATE_TARGET_CONFIG"])
 example_path = Path(os.environ["CG_UPDATE_EXAMPLE_CONFIG"])
 merged_path = Path(os.environ["CG_UPDATE_MERGED_CONFIG"])
+tty_path = Path(os.environ.get("CG_UPDATE_TTY", "/dev/tty"))
+
+
+try:
+    tty_in = tty_path.open("r", encoding="utf-8", errors="ignore")
+except OSError as e:
+    print(f"ОШИБКА: не удалось открыть {tty_path} для ввода: {e}")
+    sys.exit(1)
 
 
 def load_yaml(path: Path) -> Any:
@@ -111,7 +120,12 @@ def prompt_choice(path: str, old_value: Any, new_value: Any) -> Any:
     print(f"  old: {old_value!r}")
     print(f"  new: {new_value!r}")
     while True:
-        choice = input("Выбрать old/new? [old/new]: ").strip().lower()
+        print("Выбрать old/new? [old/new]: ", end="", flush=True)
+        choice = tty_in.readline()
+        if not choice:
+            print("\nОШИБКА: stdin терминала закрыт")
+            sys.exit(1)
+        choice = choice.strip().lower()
         if choice == "old":
             return old_value
         if choice == "new":
@@ -128,7 +142,12 @@ def merge(old_cfg: Any, new_cfg: Any, path: str = "") -> Any:
                 print()
                 print(f"Новый параметр: {current_path} = {new_value!r}")
                 while True:
-                    choice = input("Добавить в config.yml? [yes/no]: ").strip().lower()
+                    print("Добавить в config.yml? [yes/no]: ", end="", flush=True)
+                    choice = tty_in.readline()
+                    if not choice:
+                        print("\nОШИБКА: stdin терминала закрыт")
+                        sys.exit(1)
+                    choice = choice.strip().lower()
                     if choice in {"y", "yes", "да"}:
                         result[key] = deepcopy(new_value)
                         break
@@ -160,9 +179,11 @@ merged = merge(old_config, new_example)
 with merged_path.open("w", encoding="utf-8") as f:
     yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
 
+tty_in.close()
+
 print()
 print(f"Временный merged config сохранён: {merged_path}")
-PY
+' 
 
     cp "$TMP_DIR/config.merged.yml" "$INSTALL_DIR/config.yml"
     echo "  config.yml обновлён после интерактивной сверки"
