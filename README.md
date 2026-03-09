@@ -41,7 +41,12 @@ sudo ./scripts/install.sh
 
 Скрипт автоматически: установит PostgreSQL (если нет), создаст БД и пользователя,
 настроит venv, заполнит config.yml и применит SQL-схему.  
-После установки останется только прописать MQTT-хост в config.yml и запустить сервис.
+После установки останется только прописать MQTT-хост в `/etc/db-writer/config.yml` и запустить сервис.
+
+По умолчанию:
+
+- код и `venv` устанавливаются в `/opt/db-writer`
+- рабочий конфиг хранится в `/etc/db-writer/config.yml`
 
 ### Пошаговая установка (вручную)
 
@@ -131,11 +136,12 @@ python -m src --config config.yml
 #### 5. Запуск как systemd service (production)
 
 Перед копированием unit-файлов проверьте пути внутри — они должны совпадать
-с реальным расположением проекта (по умолчанию `/home/<user>/db-writer`):
-```bash
-# Подставить ваш абсолютный путь (~ в systemd не работает)
-sed -i "s|/home/db-writer|$HOME/db-writer|g" systemd/*.service
+с реальным расположением проекта. По умолчанию используется:
 
+- код: `/opt/db-writer`
+- конфиг: `/etc/db-writer/config.yml`
+
+```bash
 sudo cp systemd/cg-db-writer.service /etc/systemd/system/
 sudo cp systemd/cg-db-writer-cleanup.service /etc/systemd/system/
 sudo cp systemd/cg-db-writer-cleanup.timer /etc/systemd/system/
@@ -166,10 +172,13 @@ sudo ./scripts/update.sh
 Скрипт:
 
 - копирует свежий код в `/home/db-writer`;
+- копирует свежий код в `/opt/db-writer`;
 - переустанавливает зависимости из `requirements.txt`;
 - интерактивно сравнивает `config.example.yml` и рабочий `config.yml`;
 - при расхождениях спрашивает, какое значение оставить: `old` или `new`;
 - применяет SQL-схему и перезапускает `systemd` сервис.
+
+Рабочий конфиг при этом хранится в `/etc/db-writer/config.yml`.
 
 ### Настройка под burst-нагрузку
 
@@ -380,6 +389,7 @@ cg-db-writer/
 │   ├── __init__.py
 │   ├── __main__.py             # python -m src
 │   ├── main.py                 # Точка входа, event loop, MQTT
+│   ├── health.py               # HTTP health endpoint
 │   ├── config.py               # Загрузка config.yml
 │   ├── log.py                  # Настройка логирования
 │   ├── db.py                   # Все SQL операции (asyncpg)
@@ -390,6 +400,7 @@ cg-db-writer/
 │   └── retention.py            # Очистка устаревших данных
 ├── scripts/
 │   ├── install.sh              # Автоустановка на Ubuntu
+│   ├── update.sh               # Обновление/миграция установленного сервиса
 │   ├── setup_db.py             # Применение SQL схемы
 │   ├── check_health.py         # Проверка подключений и данных
 │   ├── test_publish.py         # Тестовая публикация в MQTT
