@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#!/usr/bin/env bash
 # =============================================================================
 # CG DB-Writer — установка на Ubuntu (запускать из корня репозитория)
 #
@@ -10,14 +11,18 @@
 #   1) Проверяет Python 3.10+
 #   2) Устанавливает PostgreSQL (если нет) и создаёт БД/пользователя
 #   3) Создаёт venv и ставит зависимости
-#   4) Копирует config.example.yml → config.yml (если нет)
+#   4) Копирует config.example.yml → /etc/db-writer/config.yml (если нет)
 #   5) Устанавливает systemd unit-файлы
 # =============================================================================
 
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-INSTALL_DIR="/home/db-writer"
+INSTALL_DIR="/opt/db-writer"
+CONFIG_DIR="/etc/db-writer"
+CONFIG_FILE="$CONFIG_DIR/config.yml"
+LEGACY_INSTALL_DIR="/home/db-writer"
+LEGACY_CONFIG_FILE="$LEGACY_INSTALL_DIR/config.yml"
 SERVICE_USER="cg"
 
 echo "============================================="
@@ -105,6 +110,8 @@ else
     echo "  Уже в $INSTALL_DIR, пропускаю"
 fi
 
+mkdir -p "$CONFIG_DIR"
+
 # --- 3) Virtual environment ---
 echo ""
 echo "[3/6] Создание venv и установка зависимостей..."
@@ -128,21 +135,26 @@ echo "  Зависимости установлены"
 echo ""
 echo "[4/6] Конфигурация..."
 
-if [ ! -f "$INSTALL_DIR/config.yml" ]; then
-    cp "$INSTALL_DIR/config.example.yml" "$INSTALL_DIR/config.yml"
-    echo "  Создан config.yml (postgres: cg_writer/cg_writer)"
-    echo "  MQTT секция — заполните при необходимости: nano $INSTALL_DIR/config.yml"
+if [ ! -f "$CONFIG_FILE" ]; then
+    if [ -f "$LEGACY_CONFIG_FILE" ]; then
+        cp "$LEGACY_CONFIG_FILE" "$CONFIG_FILE"
+        echo "  Перенесён старый config.yml из $LEGACY_CONFIG_FILE"
+    else
+        cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
+        echo "  Создан $CONFIG_FILE (postgres: cg_writer/cg_writer)"
+        echo "  MQTT секция — заполните при необходимости: nano $CONFIG_FILE"
+    fi
 else
-    echo "  config.yml уже существует"
+    echo "  $CONFIG_FILE уже существует"
 fi
 
 # Применяем SQL схему автоматически
 echo "  Применяю SQL схему..."
-if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$INSTALL_DIR/config.yml" > /dev/null 2>&1; then
+if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$CONFIG_FILE" > /dev/null 2>&1; then
     echo "  Схема применена"
 else
-    echo "  ⚠ Не удалось применить схему (проверьте config.yml и запустите вручную)"
-    echo "    cd $INSTALL_DIR && venv/bin/python scripts/setup_db.py --config config.yml"
+    echo "  ⚠ Не удалось применить схему (проверьте $CONFIG_FILE и запустите вручную)"
+    echo "    cd $INSTALL_DIR && venv/bin/python scripts/setup_db.py --config $CONFIG_FILE"
 fi
 
 # --- 5) Системный пользователь и systemd ---
@@ -155,6 +167,9 @@ if ! id "$SERVICE_USER" &> /dev/null; then
 fi
 
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR"
+chmod 750 "$CONFIG_DIR"
+chmod 640 "$CONFIG_FILE" || true
 
 cp "$REPO_DIR/systemd/cg-db-writer.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/cg-db-writer-cleanup.service" /etc/systemd/system/
@@ -180,7 +195,7 @@ else
 fi
 
 # Health check
-if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/check_health.py" --config "$INSTALL_DIR/config.yml" > /tmp/cg-health-check.txt 2>&1; then
+if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/check_health.py" --config "$CONFIG_FILE" > /tmp/cg-health-check.txt 2>&1; then
     echo "  ✓ PostgreSQL: OK"
     echo "  ✓ MQTT: OK"
 else
@@ -195,7 +210,8 @@ echo "============================================="
 echo "  Установка завершена!"
 echo "============================================="
 echo ""
-echo "  Конфиг:  $INSTALL_DIR/config.yml"
+echo "  Код:     $INSTALL_DIR"
+echo "  Конфиг:  $CONFIG_FILE"
 echo "  Логи:    sudo journalctl -u cg-db-writer -f"
 echo "  Статус:  sudo systemctl status cg-db-writer"
 echo ""

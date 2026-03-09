@@ -8,7 +8,7 @@
 #   sudo ./scripts/update.sh
 #
 # Что делает:
-#   1) Копирует актуальные файлы проекта в /home/db-writer
+#   1) Копирует актуальные файлы проекта в /opt/db-writer
 #   2) Обновляет зависимости из requirements.txt
 #   3) Интерактивно сверяет config.example.yml и config.yml
 #   4) Применяет SQL схему
@@ -18,7 +18,11 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-INSTALL_DIR="/home/db-writer"
+INSTALL_DIR="/opt/db-writer"
+CONFIG_DIR="/etc/db-writer"
+CONFIG_FILE="$CONFIG_DIR/config.yml"
+LEGACY_INSTALL_DIR="/home/db-writer"
+LEGACY_CONFIG_FILE="$LEGACY_INSTALL_DIR/config.yml"
 SERVICE_NAME="cg-db-writer"
 SERVICE_USER="cg"
 
@@ -32,19 +36,28 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo "ОШИБКА: каталог установки не найден: $INSTALL_DIR"
-    echo "Сначала выполните установку: sudo ./scripts/install.sh"
-    exit 1
-fi
-
-if [ ! -f "$INSTALL_DIR/venv/bin/python" ]; then
-    echo "ОШИБКА: venv не найден в $INSTALL_DIR/venv"
-    exit 1
-fi
-
 if [ ! -t 0 ]; then
     echo "ОШИБКА: update.sh требует интерактивный терминал для merge config.yml"
+    exit 1
+fi
+
+PYTHON_BIN=""
+for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        if "$candidate" - <<'PY'
+import sys
+ok = (sys.version_info.major, sys.version_info.minor) >= (3, 10)
+raise SystemExit(0 if ok else 1)
+PY
+        then
+            PYTHON_BIN="$candidate"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+    echo "ОШИБКА: Python 3.10+ не найден"
     exit 1
 fi
 
@@ -53,6 +66,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "[1/6] Копирование файлов..."
 mkdir -p "$INSTALL_DIR"
+mkdir -p "$CONFIG_DIR"
 rm -rf "$INSTALL_DIR/src" "$INSTALL_DIR/schema" "$INSTALL_DIR/scripts"
 cp -r "$REPO_DIR/src" "$INSTALL_DIR/"
 cp -r "$REPO_DIR/schema" "$INSTALL_DIR/"
@@ -64,6 +78,10 @@ echo "  Файлы обновлены"
 echo ""
 echo "[2/6] Обновление зависимостей..."
 cd "$INSTALL_DIR"
+if [ ! -d "venv" ]; then
+    "$PYTHON_BIN" -m venv venv
+    echo "  Создан новый venv в $INSTALL_DIR/venv"
+fi
 venv/bin/pip install --quiet --upgrade pip
 venv/bin/pip install --quiet -r requirements.txt
 echo "  Зависимости обновлены"
@@ -71,13 +89,18 @@ echo "  Зависимости обновлены"
 echo ""
 echo "[3/6] Сверка config.yml с новым config.example.yml..."
 
-if [ ! -f "$INSTALL_DIR/config.yml" ]; then
-    cp "$INSTALL_DIR/config.example.yml" "$INSTALL_DIR/config.yml"
-    echo "  config.yml отсутствовал, создан из config.example.yml"
+if [ ! -f "$CONFIG_FILE" ]; then
+    if [ -f "$LEGACY_CONFIG_FILE" ]; then
+        cp "$LEGACY_CONFIG_FILE" "$CONFIG_FILE"
+        echo "  Перенесён старый config.yml из $LEGACY_CONFIG_FILE"
+    else
+        cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
+        echo "  $CONFIG_FILE отсутствовал, создан из config.example.yml"
+    fi
 else
-    cp "$INSTALL_DIR/config.yml" "$TMP_DIR/config.yml.backup"
+    cp "$CONFIG_FILE" "$TMP_DIR/config.yml.backup"
     echo "  Резервная копия config.yml: $TMP_DIR/config.yml.backup"
-    export CG_UPDATE_TARGET_CONFIG="$INSTALL_DIR/config.yml"
+    export CG_UPDATE_TARGET_CONFIG="$CONFIG_FILE"
     export CG_UPDATE_EXAMPLE_CONFIG="$INSTALL_DIR/config.example.yml"
     export CG_UPDATE_MERGED_CONFIG="$TMP_DIR/config.merged.yml"
     export CG_UPDATE_TTY="/dev/tty"
@@ -185,13 +208,13 @@ print()
 print(f"Временный merged config сохранён: {merged_path}")
 ' 
 
-    cp "$TMP_DIR/config.merged.yml" "$INSTALL_DIR/config.yml"
-    echo "  config.yml обновлён после интерактивной сверки"
+    cp "$TMP_DIR/config.merged.yml" "$CONFIG_FILE"
+    echo "  $CONFIG_FILE обновлён после интерактивной сверки"
 fi
 
 echo ""
 echo "[4/6] Применение SQL схемы..."
-if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$INSTALL_DIR/config.yml" > /tmp/cg-db-writer-update-db.txt 2>&1; then
+if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$CONFIG_FILE" > /tmp/cg-db-writer-update-db.txt 2>&1; then
     echo "  Схема применена"
 else
     echo "  ОШИБКА: не удалось применить схему"
@@ -209,7 +232,10 @@ cp "$REPO_DIR/systemd/cg-db-writer-cleanup.timer" /etc/systemd/system/
 systemctl daemon-reload
 if id "$SERVICE_USER" >/dev/null 2>&1; then
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
+    chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR"
 fi
+chmod 750 "$CONFIG_DIR"
+chmod 640 "$CONFIG_FILE" || true
 systemctl restart "$SERVICE_NAME"
 echo "  Сервис перезапущен"
 
