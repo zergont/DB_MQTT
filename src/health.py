@@ -12,6 +12,7 @@ from aiohttp import web
 
 from src import db
 from src.config import HealthCfg
+from src.version import get_version
 
 logger = logging.getLogger("cg.health")
 
@@ -55,6 +56,7 @@ def _payload(state: HealthState) -> dict[str, Any]:
         status = "ok"
 
     return {
+        "version": get_version(),
         "status": status,
         "queue_decoded_size": state.q_decoded.qsize() if state.q_decoded else 0,
         "queue_telemetry_size": state.q_telemetry.qsize() if state.q_telemetry else 0,

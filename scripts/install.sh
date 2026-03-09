@@ -102,6 +102,8 @@ if [ "$REPO_DIR" != "$INSTALL_DIR" ]; then
     cp -r "$REPO_DIR/scripts" "$INSTALL_DIR/"
     cp "$REPO_DIR/requirements.txt" "$INSTALL_DIR/"
     cp "$REPO_DIR/config.example.yml" "$INSTALL_DIR/"
+    cp "$REPO_DIR/VERSION" "$INSTALL_DIR/"
+    cp "$REPO_DIR/CHANGELOG.md" "$INSTALL_DIR/"
     echo "  Скопировано в $INSTALL_DIR"
 else
     echo "  Уже в $INSTALL_DIR, пропускаю"

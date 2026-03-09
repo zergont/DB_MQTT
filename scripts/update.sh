@@ -70,6 +70,8 @@ cp -r "$REPO_DIR/schema" "$INSTALL_DIR/"
 cp -r "$REPO_DIR/scripts" "$INSTALL_DIR/"
 cp "$REPO_DIR/requirements.txt" "$INSTALL_DIR/"
 cp "$REPO_DIR/config.example.yml" "$INSTALL_DIR/"
+cp "$REPO_DIR/VERSION" "$INSTALL_DIR/"
+cp "$REPO_DIR/CHANGELOG.md" "$INSTALL_DIR/"
 echo "  Файлы обновлены"
 
 echo ""

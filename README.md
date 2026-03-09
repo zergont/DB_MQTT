@@ -48,6 +48,13 @@ sudo ./scripts/install.sh
 - код и `venv` устанавливаются в `/opt/db-writer`
 - рабочий конфиг хранится в `/etc/db-writer/config.yml`
 
+### Версионирование
+
+- текущая версия хранится в файле `VERSION`
+- история изменений ведётся в `CHANGELOG.md`
+- установленный сервис публикует версию в `/health`
+- для релизов рекомендуется использовать `git tag` в формате `vX.Y.Z`
+
 ### Пошаговая установка (вручную)
 
 #### 1. Клонировать и настроить
@@ -379,6 +386,8 @@ SELECT count(*) FROM events WHERE created_at < now() - interval '90 days';
 
 ```
 cg-db-writer/
+├── VERSION                     # Текущая версия сервиса
+├── CHANGELOG.md                # История изменений
 ├── config.example.yml          # Шаблон конфигурации (без секретов)
 ├── requirements.txt            # Python зависимости
 ├── .gitignore                  # config.yml, env/, __pycache__/ и т.д.

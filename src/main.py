@@ -23,6 +23,7 @@ from src.handlers import dispatch, get_gps_filter
 from src.health import HealthState, health_loop
 from src.log import setup_logging
 from src.retention import _do_cleanup, retention_loop
+from src.version import get_version
 from src.watchdog import watchdog_loop
 
 logger = logging.getLogger("cg.main")
@@ -340,6 +341,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     setup_logging(cfg.logging)
+    logger.info("Starting CG DB-Writer version %s", get_version())
 
     if args.cleanup:
         asyncio.run(_run_cleanup(cfg))
