@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#!/usr/bin/env bash
 # =============================================================================
 # CG DB-Writer — обновление установленного сервиса
 #
@@ -21,8 +20,6 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="/opt/db-writer"
 CONFIG_DIR="/etc/db-writer"
 CONFIG_FILE="$CONFIG_DIR/config.yml"
-LEGACY_INSTALL_DIR="/home/db-writer"
-LEGACY_CONFIG_FILE="$LEGACY_INSTALL_DIR/config.yml"
 SERVICE_NAME="cg-db-writer"
 SERVICE_USER="cg"
 
@@ -90,13 +87,8 @@ echo ""
 echo "[3/6] Сверка config.yml с новым config.example.yml..."
 
 if [ ! -f "$CONFIG_FILE" ]; then
-    if [ -f "$LEGACY_CONFIG_FILE" ]; then
-        cp "$LEGACY_CONFIG_FILE" "$CONFIG_FILE"
-        echo "  Перенесён старый config.yml из $LEGACY_CONFIG_FILE"
-    else
-        cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
-        echo "  $CONFIG_FILE отсутствовал, создан из config.example.yml"
-    fi
+    cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
+    echo "  $CONFIG_FILE отсутствовал, создан из config.example.yml"
 else
     cp "$CONFIG_FILE" "$TMP_DIR/config.yml.backup"
     echo "  Резервная копия config.yml: $TMP_DIR/config.yml.backup"

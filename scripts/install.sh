@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#!/usr/bin/env bash
 # =============================================================================
 # CG DB-Writer — установка на Ubuntu (запускать из корня репозитория)
 #
@@ -21,8 +20,6 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="/opt/db-writer"
 CONFIG_DIR="/etc/db-writer"
 CONFIG_FILE="$CONFIG_DIR/config.yml"
-LEGACY_INSTALL_DIR="/home/db-writer"
-LEGACY_CONFIG_FILE="$LEGACY_INSTALL_DIR/config.yml"
 SERVICE_USER="cg"
 
 echo "============================================="
@@ -136,14 +133,9 @@ echo ""
 echo "[4/6] Конфигурация..."
 
 if [ ! -f "$CONFIG_FILE" ]; then
-    if [ -f "$LEGACY_CONFIG_FILE" ]; then
-        cp "$LEGACY_CONFIG_FILE" "$CONFIG_FILE"
-        echo "  Перенесён старый config.yml из $LEGACY_CONFIG_FILE"
-    else
-        cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
-        echo "  Создан $CONFIG_FILE (postgres: cg_writer/cg_writer)"
-        echo "  MQTT секция — заполните при необходимости: nano $CONFIG_FILE"
-    fi
+    cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
+    echo "  Создан $CONFIG_FILE (postgres: cg_writer/cg_writer)"
+    echo "  MQTT секция — заполните при необходимости: nano $CONFIG_FILE"
 else
     echo "  $CONFIG_FILE уже существует"
 fi

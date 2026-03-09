@@ -171,7 +171,6 @@ sudo ./scripts/update.sh
 
 Скрипт:
 
-- копирует свежий код в `/home/db-writer`;
 - копирует свежий код в `/opt/db-writer`;
 - переустанавливает зависимости из `requirements.txt`;
 - интерактивно сравнивает `config.example.yml` и рабочий `config.yml`;
@@ -400,7 +399,7 @@ cg-db-writer/
 │   └── retention.py            # Очистка устаревших данных
 ├── scripts/
 │   ├── install.sh              # Автоустановка на Ubuntu
-│   ├── update.sh               # Обновление/миграция установленного сервиса
+│   ├── update.sh               # Обновление установленного сервиса
 │   ├── setup_db.py             # Применение SQL схемы
 │   ├── check_health.py         # Проверка подключений и данных
 │   ├── test_publish.py         # Тестовая публикация в MQTT
