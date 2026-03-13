@@ -94,13 +94,15 @@ class GpsFilterCfg:
 @dataclass
 class KpiRegister:
     addr: int
+    equip_type: str = "pcc"
+    min_interval_sec: int = 0
     heartbeat_sec: int = 60
     tolerance: float = 0.1
 
 @dataclass
 class HistoryDefaults:
     tolerance_analog: float = 0.5
-    min_interval_sec: int = 10
+    min_interval_sec: int = 2
     heartbeat_sec: int = 900
     store_history: bool = True
     value_kind: str = "analog"
@@ -110,9 +112,9 @@ class HistoryPolicyCfg:
     defaults: HistoryDefaults = field(default_factory=HistoryDefaults)
     kpi_registers: list[KpiRegister] = field(default_factory=list)
 
-    def kpi_map(self) -> dict[int, KpiRegister]:
-        """addr → KpiRegister для быстрого поиска."""
-        return {k.addr: k for k in self.kpi_registers}
+    def kpi_map(self) -> dict[tuple[str, int], KpiRegister]:
+        """(equip_type, addr) → KpiRegister для быстрого поиска."""
+        return {(k.equip_type, k.addr): k for k in self.kpi_registers}
 
 @dataclass
 class EventsPolicyCfg:
@@ -128,11 +130,13 @@ class EventsPolicyCfg:
 @dataclass
 class RetentionCfg:
     gps_raw_hours: int = 72
-    history_days: int = 30
+    history_raw_days: int = 7
+    history_1min_days: int = 30
+    history_1hour_days: int = 365
     events_days: int = 90
 
     cleanup_interval_hours: int = 24
-    batch_size: int = 5000
+    batch_size: int = 10000
 
 @dataclass
 class LoggingCfg:

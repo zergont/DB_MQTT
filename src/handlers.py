@@ -16,6 +16,7 @@ from src import db
 from src.config import AppConfig
 from src.gps_filter import GpsFilter, GpsPoint, GpsVerdict, _haversine_m
 from src.history_policy import HistoryDecision, resolve_params, should_write_history
+from src.aggregation import notify_history_write
 
 logger = logging.getLogger("cg.handler")
 
@@ -274,6 +275,10 @@ async def _handle_decoded(
             if event_rows:
                 await db.insert_event_batch(conn, event_rows)
 
+    # After transaction committed — notify aggregation about potential late writes
+    if history_batch:
+        notify_history_write(ts)
+
     logger.debug(
         "Decoded %s/pcc/%d: %d regs, latest=%d, history=%d, events=%d",
         router_sn,
@@ -357,7 +362,7 @@ async def _process_register_batched(
 
     # --- History decision ---
     catalog_row = catalog_map.get(addr)
-    params = resolve_params(cfg, addr, catalog_row)
+    params = resolve_params(cfg, equip_type, addr, catalog_row)
 
     key = (router_sn, equip_type, panel_id, addr)
     last_h_ts = _last_history_ts.get(key)

@@ -61,19 +61,28 @@ gps_filter:
 history_policy:
   defaults:
     tolerance_analog: 0.5
-    min_interval_sec: 10
-    heartbeat_sec: 900      # 15 мин — дефолт для обычных регистров
+    min_interval_sec: 2       # было 10; для KPI регистров перекрывается ниже
+    heartbeat_sec: 900        # 15 мин — дефолт для обычных регистров
     store_history: true
-    value_kind: "analog"    # analog|discrete|counter|enum|text
+    value_kind: "analog"      # analog|discrete|counter|enum|text
 
-  # KPI регистры — частый heartbeat (список addr)
+  # KPI регистры — высокая частота, per-register настройки
   kpi_registers:
-    - addr: 40034           # GensetTotal kW (Нагрузка)
+    - addr: 40034             # GensetTotal kW (Нагрузка)
+      equip_type: "pcc"
+      min_interval_sec: 0     # каждый пакет (ограничение только по tolerance)
+      heartbeat_sec: 60
+      tolerance: 0.5
+    - addr: 40062             # OilPressure (Давление масла двигателя)
+      equip_type: "pcc"
+      min_interval_sec: 0
       heartbeat_sec: 60
       tolerance: 0.1
-    - addr: 40062           # OilPressure (Давление масла двигателя)
-      heartbeat_sec: 60
-      tolerance: 0.1
+    - addr: 40070             # Наработка
+      equip_type: "pcc"
+      min_interval_sec: 5
+      heartbeat_sec: 300
+      tolerance: 1
 
 # ---------- Events policy ----------------------------------------------------
 events_policy:
@@ -85,13 +94,15 @@ events_policy:
   enable_gps_reject_events: true
   enable_unknown_register_events: true
 
-# ---------- Retention (очистка) ----------------------------------------------
+# ---------- Retention (очистка) — tiered ------------------------------------
 retention:
   gps_raw_hours: 72
-  history_days: 30
+  history_raw_days: 7         # raw data: 7 дней (было history_days: 30)
+  history_1min_days: 30       # 1-мин агрегаты: 30 дней
+  history_1hour_days: 365     # 1-час агрегаты: 1 год
   events_days: 90
   cleanup_interval_hours: 24
-  batch_size: 5000
+  batch_size: 10000           # было 5000; увеличено для 50+ двигателей
 
 # ---------- Health endpoint ---------------------------------------------------
 health:

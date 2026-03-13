@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import aiomqtt
 
 from src import db
+from src.aggregation import aggregation_loop
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
 from src.handlers import dispatch, get_gps_filter
@@ -280,6 +281,7 @@ async def _run(cfg: AppConfig) -> None:
             asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded), name="mqtt_ingest"),
             asyncio.create_task(watchdog_loop(cfg, _last_seen, _panel_last_seen), name="watchdog"),
             asyncio.create_task(retention_loop(cfg.retention), name="retention"),
+            asyncio.create_task(aggregation_loop(), name="aggregation"),
         ]
 
         if cfg.health.enabled:

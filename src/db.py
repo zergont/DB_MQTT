@@ -392,15 +392,62 @@ async def cleanup_gps_raw(conn: asyncpg.Connection, hours: int, batch: int) -> i
     return total
 
 
-async def cleanup_history(conn: asyncpg.Connection, days: int, batch: int) -> int:
+async def cleanup_history_raw(
+    conn: asyncpg.Connection,
+    cutoff: datetime,
+    batch: int,
+) -> int:
+    """Delete raw history older than cutoff (by received_at)."""
     total = 0
     while True:
         tag = await conn.execute(
             """
             DELETE FROM history WHERE id IN (
               SELECT id FROM history
-              WHERE received_at < now() - make_interval(days => $1)
+              WHERE received_at < $1
               ORDER BY id
+              LIMIT $2
+            )
+            """,
+            cutoff,
+            batch,
+        )
+        n = int(tag.split()[-1])
+        total += n
+        if n < batch:
+            break
+    return total
+
+
+async def cleanup_history_1min(conn: asyncpg.Connection, days: int, batch: int) -> int:
+    total = 0
+    while True:
+        tag = await conn.execute(
+            """
+            DELETE FROM history_1min WHERE ctid IN (
+              SELECT ctid FROM history_1min
+              WHERE ts < now() - make_interval(days => $1)
+              LIMIT $2
+            )
+            """,
+            days,
+            batch,
+        )
+        n = int(tag.split()[-1])
+        total += n
+        if n < batch:
+            break
+    return total
+
+
+async def cleanup_history_1hour(conn: asyncpg.Connection, days: int, batch: int) -> int:
+    total = 0
+    while True:
+        tag = await conn.execute(
+            """
+            DELETE FROM history_1hour WHERE ctid IN (
+              SELECT ctid FROM history_1hour
+              WHERE ts < now() - make_interval(days => $1)
               LIMIT $2
             )
             """,
@@ -472,3 +519,82 @@ async def get_register_catalog_rows_many(
         addrs,
     )
     return {int(r["addr"]): r for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Aggregation (history → 1min → 1hour)
+# ---------------------------------------------------------------------------
+
+async def aggregate_to_1min(
+    conn: asyncpg.Connection,
+    minute_start: datetime,
+    minute_end: datetime,
+) -> int:
+    """Агрегировать raw history за [minute_start, minute_end) в history_1min.
+
+    Возвращает количество upsert-нутых групп.
+    """
+    tag = await conn.execute(
+        """
+        INSERT INTO history_1min
+            (router_sn, equip_type, panel_id, addr, ts,
+             avg_value, min_value, max_value, sample_count)
+        SELECT
+            router_sn, equip_type, panel_id, addr,
+            date_trunc('minute', ts) AS ts,
+            avg(value)  AS avg_value,
+            min(value)  AS min_value,
+            max(value)  AS max_value,
+            count(*)    AS sample_count
+        FROM history
+        WHERE ts >= $1 AND ts < $2
+        GROUP BY 1, 2, 3, 4, 5
+        ON CONFLICT (router_sn, equip_type, panel_id, addr, ts)
+        DO UPDATE SET
+            avg_value    = EXCLUDED.avg_value,
+            min_value    = EXCLUDED.min_value,
+            max_value    = EXCLUDED.max_value,
+            sample_count = EXCLUDED.sample_count
+        """,
+        minute_start,
+        minute_end,
+    )
+    return int(tag.split()[-1])
+
+
+async def aggregate_to_1hour(
+    conn: asyncpg.Connection,
+    hour_start: datetime,
+    hour_end: datetime,
+) -> int:
+    """Агрегировать history_1min за [hour_start, hour_end) в history_1hour.
+
+    Использует weighted average по sample_count для точного среднего.
+    Возвращает количество upsert-нутых групп.
+    """
+    tag = await conn.execute(
+        """
+        INSERT INTO history_1hour
+            (router_sn, equip_type, panel_id, addr, ts,
+             avg_value, min_value, max_value, sample_count)
+        SELECT
+            router_sn, equip_type, panel_id, addr,
+            date_trunc('hour', ts) AS ts,
+            SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0) AS avg_value,
+            MIN(min_value) AS min_value,
+            MAX(max_value) AS max_value,
+            SUM(sample_count) AS sample_count
+        FROM history_1min
+        WHERE ts >= $1 AND ts < $2
+        GROUP BY 1, 2, 3, 4, 5
+        ON CONFLICT (router_sn, equip_type, panel_id, addr, ts)
+        DO UPDATE SET
+            avg_value    = EXCLUDED.avg_value,
+            min_value    = EXCLUDED.min_value,
+            max_value    = EXCLUDED.max_value,
+            sample_count = EXCLUDED.sample_count
+        """,
+        hour_start,
+        hour_end,
+    )
+    return int(tag.split()[-1])

@@ -27,6 +27,7 @@ class _RegParams:
 
 def resolve_params(
     cfg: AppConfig,
+    equip_type: str,
     addr: int,
     catalog_row: Any | None,
 ) -> _RegParams:
@@ -52,9 +53,10 @@ def resolve_params(
         store = bool(catalog_row["store_history"])
         vk = catalog_row["value_kind"] or vk
 
-    # Перекрываем из kpi_registers
-    kpi = kpi_map.get(addr)
+    # Перекрываем из kpi_registers (ключ: equip_type + addr)
+    kpi = kpi_map.get((equip_type, addr))
     if kpi is not None:
+        min_interval = kpi.min_interval_sec
         heartbeat = kpi.heartbeat_sec
         tolerance = kpi.tolerance
 
