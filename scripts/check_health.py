@@ -29,6 +29,8 @@ EXPECTED_TABLES = [
     "latest_state",
     "history",
     "events",
+    "history_1min",
+    "history_1hour",
 ]
 
 
@@ -92,6 +94,16 @@ async def check_postgres(cfg) -> bool:
             if last:
                 age = (datetime.now(timezone.utc) - last).total_seconds()
                 suffix = f" (последнее {age:.0f}s назад)"
+        elif t == "history_1min" and count > 0:
+            last = await conn.fetchval("SELECT max(ts) FROM history_1min")
+            if last:
+                age = (datetime.now(timezone.utc) - last).total_seconds()
+                suffix = f" (последняя {age:.0f}s назад)"
+        elif t == "history_1hour" and count > 0:
+            last = await conn.fetchval("SELECT max(ts) FROM history_1hour")
+            if last:
+                age = (datetime.now(timezone.utc) - last).total_seconds()
+                suffix = f" (последняя {age:.0f}s назад)"
 
         print(f" {t:30s} {count:>8d}{suffix}")
 

@@ -33,7 +33,7 @@ async def retention_loop(cfg: RetentionCfg) -> None:
 
     while True:
         try:
-            await _do_cleanup(cfg)
+            await do_cleanup(cfg)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -42,7 +42,7 @@ async def retention_loop(cfg: RetentionCfg) -> None:
         await asyncio.sleep(interval_sec)
 
 
-async def _do_cleanup(cfg: RetentionCfg) -> None:
+async def do_cleanup(cfg: RetentionCfg) -> None:
     logger.info("Retention cleanup started")
 
     # Watermark protection: не удаляем raw данные, которые ещё не агрегированы

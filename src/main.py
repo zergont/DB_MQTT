@@ -20,10 +20,10 @@ from src import db
 from src.aggregation import aggregation_loop
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
-from src.handlers import dispatch, get_gps_filter
+from src.handlers import dispatch, get_gps_filter, restore_history_timestamps
 from src.health import HealthState, health_loop
 from src.log import setup_logging
-from src.retention import _do_cleanup, retention_loop
+from src.retention import do_cleanup, retention_loop
 from src.version import get_version
 from src.watchdog import watchdog_loop
 
@@ -39,7 +39,6 @@ class _IngestItem:
     topic: str
     payload: bytes
     received_at: datetime
-    kind: str  # "telemetry" | "decoded"
 
 
 def _touch_last_seen(topic: str) -> None:
@@ -164,15 +163,13 @@ async def _mqtt_ingest_loop(
 
                     _touch_last_seen(topic)
 
-                    kind = "telemetry" if topic.startswith("cg/v1/telemetry/") else "decoded"
                     item = _IngestItem(
                         topic=topic,
                         payload=payload,
                         received_at=datetime.now(timezone.utc),
-                        kind=kind,
                     )
 
-                    if kind == "telemetry":
+                    if topic.startswith("cg/v1/telemetry/"):
                         # telemetry важнее; очередь маленькая, переполняться не должна
                         await _queue_put(
                             q_telemetry,
@@ -232,7 +229,7 @@ async def _worker_loop(
             attempt = 0
             while True:
                 try:
-                    await dispatch(item.topic, item.payload, cfg, _last_seen, _panel_last_seen)
+                    await dispatch(item.topic, item.payload, cfg)
                     health_state.mark_write()
                     break
                 except asyncio.CancelledError:
@@ -276,6 +273,7 @@ async def _run(cfg: AppConfig) -> None:
 
     try:
         await _restore_gps_state(cfg)
+        await restore_history_timestamps()
 
         tasks: list[asyncio.Task] = [
             asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded), name="mqtt_ingest"),
@@ -315,7 +313,7 @@ async def _run_cleanup(cfg: AppConfig) -> None:
     """Однократная очистка (CLI)."""
     await db.init_pool(cfg.postgres)
     try:
-        await _do_cleanup(cfg.retention)
+        await do_cleanup(cfg.retention)
     finally:
         await db.close_pool()
 

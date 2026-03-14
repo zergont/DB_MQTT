@@ -44,13 +44,6 @@ class PostgresCfg:
     pool_min: int = 2
     pool_max: int = 10
 
-    @property
-    def dsn(self) -> str:
-        return (
-            f"postgresql://{self.user}:{self.password}"
-            f"@{self.host}:{self.port}/{self.dbname}"
-        )
-
 @dataclass
 class IngestCfg:
     """Настройки приёма сообщений и защиты от перегрузки.

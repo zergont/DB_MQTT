@@ -155,49 +155,6 @@ async def get_gps_latest(
 # Latest state
 # ---------------------------------------------------------------------------
 
-async def upsert_latest_state(
-    conn: asyncpg.Connection,
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    addr: int,
-    ts: datetime | None,
-    value: Any,
-    raw: int | None,
-    text: str | None,
-    unit: str | None,
-    name: str | None,
-    reason: str | None,
-) -> None:
-    await conn.execute(
-        """
-        INSERT INTO latest_state
-          (router_sn, equip_type, panel_id, addr, ts, value, raw, text, unit, name, reason, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
-        ON CONFLICT (router_sn, equip_type, panel_id, addr) DO UPDATE SET
-          ts = EXCLUDED.ts,
-          value = EXCLUDED.value,
-          raw = EXCLUDED.raw,
-          text = EXCLUDED.text,
-          unit = EXCLUDED.unit,
-          name = EXCLUDED.name,
-          reason = EXCLUDED.reason,
-          updated_at = now()
-        """,
-        router_sn,
-        equip_type,
-        panel_id,
-        addr,
-        ts,
-        value,
-        raw,
-        text,
-        unit,
-        name,
-        reason,
-    )
-
-
 async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
     """Batch upsert latest_state rows.
 
@@ -222,25 +179,6 @@ async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple])
           updated_at = now()
         """,
         rows,
-    )
-
-
-async def get_latest_state_row(
-    conn: asyncpg.Connection,
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    addr: int,
-) -> asyncpg.Record | None:
-    return await conn.fetchrow(
-        """
-        SELECT * FROM latest_state
-        WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3 AND addr=$4
-        """,
-        router_sn,
-        equip_type,
-        panel_id,
-        addr,
     )
 
 
@@ -270,38 +208,6 @@ async def get_latest_state_rows_many(
 # ---------------------------------------------------------------------------
 # History
 # ---------------------------------------------------------------------------
-
-async def insert_history(
-    conn: asyncpg.Connection,
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    addr: int,
-    ts: datetime | None,
-    value: Any,
-    raw: int | None,
-    text: str | None,
-    reason: str | None,
-    write_reason: str,
-) -> None:
-    await conn.execute(
-        """
-        INSERT INTO history
-          (router_sn, equip_type, panel_id, addr, ts, value, raw, text, reason, write_reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        """,
-        router_sn,
-        equip_type,
-        panel_id,
-        addr,
-        ts,
-        value,
-        raw,
-        text,
-        reason,
-        write_reason,
-    )
-
 
 async def insert_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
     """Batch insert history rows.
@@ -487,21 +393,6 @@ async def cleanup_events(conn: asyncpg.Connection, days: int, batch: int) -> int
 # Register catalog lookup
 # ---------------------------------------------------------------------------
 
-async def get_register_catalog_row(
-    conn: asyncpg.Connection,
-    equip_type: str,
-    addr: int,
-) -> asyncpg.Record | None:
-    return await conn.fetchrow(
-        """
-        SELECT * FROM register_catalog
-        WHERE equip_type = $1 AND addr = $2
-        """,
-        equip_type,
-        addr,
-    )
-
-
 async def get_register_catalog_rows_many(
     conn: asyncpg.Connection,
     equip_type: str,
@@ -545,7 +436,7 @@ async def aggregate_to_1min(
             avg(value)  AS avg_value,
             min(value)  AS min_value,
             max(value)  AS max_value,
-            count(*)    AS sample_count
+            count(value) AS sample_count
         FROM history
         WHERE ts >= $1 AND ts < $2
         GROUP BY 1, 2, 3, 4, 5

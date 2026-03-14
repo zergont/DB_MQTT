@@ -48,8 +48,10 @@ def _payload(state: HealthState) -> dict[str, Any]:
     last_write_ago_sec = _age_sec(state.last_write_at or state.started_at)
     workers_alive = _workers_alive(state)
 
-    if workers_alive <= 0 or last_write_ago_sec >= 300:
+    if workers_alive <= 0:
         status = "dead"
+    elif last_write_ago_sec >= 300:
+        status = "idle"
     elif last_write_ago_sec >= 60:
         status = "degraded"
     else:

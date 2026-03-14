@@ -41,19 +41,29 @@ def get_gps_filter(router_sn: str, cfg: AppConfig) -> GpsFilter:
 # Dispatch
 # ---------------------------------------------------------------------------
 
+async def restore_history_timestamps() -> None:
+    """При старте загрузить _last_history_ts из БД, чтобы избежать дублей после рестарта."""
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT router_sn, equip_type, panel_id, addr, max(received_at) AS last_ts "
+            "FROM history GROUP BY router_sn, equip_type, panel_id, addr"
+        )
+        for r in rows:
+            key = (r["router_sn"], r["equip_type"], r["panel_id"], r["addr"])
+            _last_history_ts[key] = r["last_ts"]
+    logger.info("Restored history timestamps for %d register keys", len(_last_history_ts))
+
+
 async def dispatch(
     topic: str,
     payload_bytes: bytes,
     cfg: AppConfig,
-    last_seen: dict[str, datetime],
-    panel_last_seen: dict[tuple[str, int], datetime],
 ) -> None:
     """Главная точка входа: topic + raw payload → обработка."""
 
     m_tel = _RE_TELEMETRY.match(topic)
     if m_tel:
         router_sn = m_tel.group(1)
-        last_seen[router_sn] = datetime.now(timezone.utc)
         try:
             data = json.loads(payload_bytes)
         except json.JSONDecodeError as e:
@@ -66,8 +76,6 @@ async def dispatch(
     if m_dec:
         router_sn = m_dec.group(1)
         panel_id = int(m_dec.group(2))
-        last_seen[router_sn] = datetime.now(timezone.utc)
-        panel_last_seen[(router_sn, panel_id)] = datetime.now(timezone.utc)
         try:
             data = json.loads(payload_bytes)
         except json.JSONDecodeError as e:
@@ -252,7 +260,6 @@ async def _handle_decoded(
             # 2) Проходим по регистрам и считаем решения
             for reg in registers:
                 await _process_register_batched(
-                    conn,
                     cfg,
                     router_sn,
                     equip_type,
@@ -291,7 +298,6 @@ async def _handle_decoded(
 
 
 async def _process_register_batched(
-    conn: asyncpg.Connection,
     cfg: AppConfig,
     router_sn: str,
     equip_type: str,

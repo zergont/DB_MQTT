@@ -1,7 +1,12 @@
 """Quick smoke-test: parse config.example.yml and verify GPS filter logic."""
 
-from src.config import load_config
-from src.gps_filter import GpsFilter, GpsPoint
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.config import load_config  # noqa: E402
+from src.gps_filter import GpsFilter, GpsPoint  # noqa: E402
 from datetime import datetime, timezone
 
 cfg = load_config("config.example.yml")
@@ -16,7 +21,7 @@ for addr, k in kpi.items():
 
 print("History defaults:", cfg.history_policy.defaults)
 print("Retention: gps_raw={0}h history={1}d events={2}d".format(
-    cfg.retention.gps_raw_hours, cfg.retention.history_days, cfg.retention.events_days))
+    cfg.retention.gps_raw_hours, cfg.retention.history_raw_days, cfg.retention.events_days))
 
 # GPS filter test
 flt = GpsFilter(cfg.gps_filter)

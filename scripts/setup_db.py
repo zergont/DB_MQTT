@@ -6,8 +6,8 @@
 
 Что делает:
   1) Подключается к PostgreSQL (параметры из config.yml)
-  2) Применяет schema/001_init.sql (CREATE TABLE IF NOT EXISTS — безопасно)
-  3) Печатает список таблиц и количество строк
+  2) Применяет schema/schema.sql (CREATE TABLE IF NOT EXISTS — безопасно)
+  3) Проверяет наличие всех 10 таблиц и печатает количество строк
 """
 
 import argparse
@@ -20,7 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import load_config  # noqa: E402
 
-SCHEMA_FILE = Path(__file__).resolve().parent.parent / "schema" / "001_init.sql"
+SCHEMA_FILE = Path(__file__).resolve().parent.parent / "schema" / "schema.sql"
+
+EXPECTED_TABLES = [
+    "objects", "equipment", "register_catalog",
+    "gps_raw_history", "gps_latest_filtered",
+    "latest_state", "history", "events",
+    "history_1min", "history_1hour",
+]
 
 
 async def main(config_path: str) -> None:
@@ -87,9 +94,17 @@ async def main(config_path: str) -> None:
         count = await conn.fetchval(f'SELECT count(*) FROM "{tablename}"')
         print(f" {tablename:30s} ({count} строк)")
 
+    # Проверяем что все таблицы создались
+    existing = {r["tablename"] for r in rows}
+    missing = [t for t in EXPECTED_TABLES if t not in existing]
+    if missing:
+        print(f"\n ОШИБКА: таблицы не созданы: {', '.join(missing)}")
+        await conn.close()
+        raise SystemExit(1)
+
     await conn.close()
     print()
-    print("Готово! Схема применена успешно.")
+    print(f"Готово! Все {len(EXPECTED_TABLES)} таблиц на месте.")
 
 
 if __name__ == "__main__":

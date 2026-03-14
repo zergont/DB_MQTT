@@ -212,7 +212,7 @@ sudo ./scripts/update.sh
 curl http://127.0.0.1:8765/health
 ```
 
-Если `status=ok`, данные пишутся свежо. `degraded` означает, что записи давно не было, а `dead` — воркеры не живы или запись отсутствует слишком долго.
+Если `status=ok`, данные пишутся свежо. `degraded` означает, что записи давно не было (>60с). `idle` — воркеры живы, но записей нет >5 мин (нет входящих данных). `dead` — воркеры не живы.
 
 ---
 
@@ -240,6 +240,8 @@ UNION ALL SELECT 'gps_raw_history', count(*) FROM gps_raw_history
 UNION ALL SELECT 'gps_latest_filtered', count(*) FROM gps_latest_filtered
 UNION ALL SELECT 'latest_state', count(*) FROM latest_state
 UNION ALL SELECT 'history', count(*) FROM history
+UNION ALL SELECT 'history_1min', count(*) FROM history_1min
+UNION ALL SELECT 'history_1hour', count(*) FROM history_1hour
 UNION ALL SELECT 'events', count(*) FROM events;
 ```
 
@@ -374,7 +376,7 @@ sudo journalctl -u cg-db-writer-cleanup -n 20
 ```sql
 -- До очистки
 SELECT count(*) FROM gps_raw_history WHERE received_at < now() - interval '72 hours';
-SELECT count(*) FROM history WHERE received_at < now() - interval '30 days';
+SELECT count(*) FROM history WHERE received_at < now() - interval '7 days';
 SELECT count(*) FROM events WHERE created_at < now() - interval '90 days';
 
 -- После очистки — все три запроса должны вернуть 0
@@ -392,7 +394,7 @@ cg-db-writer/
 ├── requirements.txt            # Python зависимости
 ├── .gitignore                  # config.yml, env/, __pycache__/ и т.д.
 ├── schema/
-│   └── 001_init.sql            # SQL схема — все таблицы и индексы
+│   └── schema.sql              # SQL схема — все таблицы и индексы
 ├── src/
 │   ├── __init__.py
 │   ├── __main__.py             # python -m src
@@ -404,6 +406,7 @@ cg-db-writer/
 │   ├── handlers.py             # Обработка MQTT сообщений
 │   ├── gps_filter.py           # GPS anti-teleport фильтр
 │   ├── history_policy.py       # Логика «писать ли в history»
+│   ├── aggregation.py          # Фоновая агрегация history → 1min → 1hour
 │   ├── watchdog.py             # Мониторинг online/offline/stale
 │   └── retention.py            # Очистка устаревших данных
 ├── scripts/
@@ -435,7 +438,7 @@ cg-db-writer/
 | `gps_filter` | Пороги anti-teleport (sats, fix, jump, speed, confirm) |
 | `history_policy` | Tolerance, min_interval, heartbeat, KPI регистры |
 | `events_policy` | Пороги stale/offline, включение GPS/unknown events |
-| `retention` | Сроки хранения (gps 72h, history 30d, events 90d) |
+| `retention` | Сроки хранения (gps_raw 72h, history_raw 7d, 1min 30d, 1hour 365d, events 90d) |
 | `logging` | Уровень, файл, JSON формат |
 
 ---
