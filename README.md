@@ -24,6 +24,7 @@
 - **OS:** Ubuntu 22.04 / 24.04
 - **Python:** 3.10+
 - **PostgreSQL:** 14+
+- **TimescaleDB:** 2.9+ (расширение для PostgreSQL, обязательно)
 - **MQTT-брокер:** Mosquitto или совместимый (доступ по сети)
 
 ---
@@ -41,12 +42,12 @@ sudo ./scripts/install.sh
 
 Скрипт автоматически: установит PostgreSQL (если нет), создаст БД и пользователя,
 настроит venv, заполнит config.yml и применит SQL-схему.  
-После установки останется только прописать MQTT-хост в `/etc/db-writer/config.yml` и запустить сервис.
+После установки останется только прописать MQTT-хост в `/opt/db-writer/config.yml` и запустить сервис.
 
 По умолчанию:
 
 - код и `venv` устанавливаются в `/opt/db-writer`
-- рабочий конфиг хранится в `/etc/db-writer/config.yml`
+- рабочий конфиг хранится в `/opt/db-writer/config.yml`
 
 ### Версионирование
 
@@ -84,7 +85,14 @@ sudo -u postgres psql -c "CREATE DATABASE cg_telemetry OWNER cg_writer;"
 sudo apt install -y postgresql postgresql-client
 sudo systemctl enable --now postgresql
 ```
-Затем создать пользователя и БД командами выше.
+Затем установить TimescaleDB (обязательно):
+```bash
+# Пример для PostgreSQL 16:
+sudo apt install -y timescaledb-2-postgresql-16
+sudo timescaledb-tune --quiet --yes
+sudo systemctl restart postgresql
+```
+Создать пользователя и БД:
 
 Применить схему:
 ```bash
@@ -135,7 +143,6 @@ python -m src --config config.yml
 2025-01-01 12:00:00  INFO     [cg.main]    Connecting to MQTT localhost:1883 …
 2025-01-01 12:00:00  INFO     [cg.main]    MQTT connected, subscribed: …
 2025-01-01 12:00:00  INFO     [cg.watchdog] Watchdog started, interval=30s
-2025-01-01 12:00:00  INFO     [cg.retention] Retention task started: …
 ```
 
 Остановка: `Ctrl+C`.
@@ -146,19 +153,14 @@ python -m src --config config.yml
 с реальным расположением проекта. По умолчанию используется:
 
 - код: `/opt/db-writer`
-- конфиг: `/etc/db-writer/config.yml`
+- конфиг: `/opt/db-writer/config.yml`
 
 ```bash
 sudo cp systemd/cg-db-writer.service /etc/systemd/system/
-sudo cp systemd/cg-db-writer-cleanup.service /etc/systemd/system/
-sudo cp systemd/cg-db-writer-cleanup.timer /etc/systemd/system/
 sudo useradd -r -s /usr/sbin/nologin cg 2>/dev/null || true
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now cg-db-writer.service
-
-# (Опционально) Если хотите вынести очистку в systemd timer:
-# sudo systemctl enable --now cg-db-writer-cleanup.timer
 ```
 
 Проверка:
@@ -184,7 +186,7 @@ sudo ./scripts/update.sh
 - при расхождениях спрашивает, какое значение оставить: `old` или `new`;
 - применяет SQL-схему и перезапускает `systemd` сервис.
 
-Рабочий конфиг при этом хранится в `/etc/db-writer/config.yml`.
+Рабочий конфиг при этом хранится в `/opt/db-writer/config.yml`.
 
 ### Настройка под burst-нагрузку
 
@@ -231,7 +233,6 @@ python scripts/check_health.py --config config.yml
 - `GPS ... accepted=True` — GPS точки принимаются (level=DEBUG)
 - `Decoded .../pcc/...: N regs, M history writes` — decoded обрабатывается (level=DEBUG)
 - `Watchdog started` — мониторинг offline/online запущен
-- `Retention task started` — очистка запланирована
 
 **Общий SQL-обзор:**
 ```sql
@@ -362,24 +363,20 @@ ORDER BY created_at DESC LIMIT 10;
 
 ### Проверка retention
 
-**Ручной запуск очистки:**
-```bash
-python -m src --config config.yml --cleanup
-```
+Retention управляется автоматически через **TimescaleDB Retention Policies** — вручную запускать ничего не нужно. Политики устанавливаются при `setup_db.py` и работают как фоновые задания TimescaleDB.
 
-**(Опционально) через systemd timer:**
-```bash
-sudo systemctl start cg-db-writer-cleanup.service
-sudo journalctl -u cg-db-writer-cleanup -n 20
-```
-
+Проверить статус политик:
 ```sql
--- До очистки
-SELECT count(*) FROM gps_raw_history WHERE received_at < now() - interval '72 hours';
-SELECT count(*) FROM history WHERE received_at < now() - interval '7 days';
-SELECT count(*) FROM events WHERE created_at < now() - interval '90 days';
+SELECT job_id, proc_name, schedule_interval, next_start, last_run_status
+FROM timescaledb_information.jobs
+WHERE proc_name IN ('policy_retention', 'policy_compression', 'policy_refresh_continuous_aggregate')
+ORDER BY proc_name;
+```
 
--- После очистки — все три запроса должны вернуть 0
+Текущий объём данных:
+```sql
+SELECT hypertable_name, pg_size_pretty(hypertable_size(format('%I', hypertable_name)::regclass)) AS size
+FROM timescaledb_information.hypertables;
 ```
 
 ---
@@ -406,9 +403,9 @@ cg-db-writer/
 │   ├── handlers.py             # Обработка MQTT сообщений
 │   ├── gps_filter.py           # GPS anti-teleport фильтр
 │   ├── history_policy.py       # Логика «писать ли в history»
-│   ├── aggregation.py          # Фоновая агрегация history → 1min → 1hour
+│   ├── aggregation.py          # [tombstone] заменена TimescaleDB Continuous Aggregates
 │   ├── watchdog.py             # Мониторинг online/offline/stale
-│   └── retention.py            # Очистка устаревших данных
+│   └── retention.py            # [tombstone] заменена TimescaleDB Retention Policies
 ├── scripts/
 │   ├── install.sh              # Автоустановка на Ubuntu
 │   ├── update.sh               # Обновление установленного сервиса
@@ -418,8 +415,6 @@ cg-db-writer/
 │   └── smoke_test.py           # Локальный тест без MQTT/Postgres
 ├── systemd/
 │   ├── cg-db-writer.service    # systemd unit
-│   ├── cg-db-writer-cleanup.service
-│   └── cg-db-writer-cleanup.timer
 └── README.md
 ```
 
@@ -438,7 +433,7 @@ cg-db-writer/
 | `gps_filter` | Пороги anti-teleport (sats, fix, jump, speed, confirm) |
 | `history_policy` | Tolerance, min_interval, heartbeat, KPI регистры |
 | `events_policy` | Пороги stale/offline, включение GPS/unknown events |
-| `retention` | Сроки хранения (gps_raw 72h, history_raw 7d, 1min 30d, 1hour 365d, events 90d) |
+| `retention` | Информационные сроки хранения (TimescaleDB управляет автоматически) |
 | `logging` | Уровень, файл, JSON формат |
 
 ---

@@ -18,8 +18,8 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="/opt/db-writer"
-CONFIG_DIR="/etc/db-writer"
-CONFIG_FILE="$CONFIG_DIR/config.yml"
+
+CONFIG_FILE="$INSTALL_DIR/config.yml"
 SERVICE_NAME="cg-db-writer"
 SERVICE_USER="cg"
 
@@ -63,7 +63,6 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "[1/6] Копирование файлов..."
 mkdir -p "$INSTALL_DIR"
-mkdir -p "$CONFIG_DIR"
 rm -rf "$INSTALL_DIR/src" "$INSTALL_DIR/schema" "$INSTALL_DIR/scripts"
 cp -r "$REPO_DIR/src" "$INSTALL_DIR/"
 cp -r "$REPO_DIR/schema" "$INSTALL_DIR/"
@@ -221,14 +220,10 @@ rm -f /tmp/cg-db-writer-update-db.txt
 echo ""
 echo "[5/6] Обновление systemd..."
 cp "$REPO_DIR/systemd/cg-db-writer.service" /etc/systemd/system/
-cp "$REPO_DIR/systemd/cg-db-writer-cleanup.service" /etc/systemd/system/
-cp "$REPO_DIR/systemd/cg-db-writer-cleanup.timer" /etc/systemd/system/
 systemctl daemon-reload
 if id "$SERVICE_USER" >/dev/null 2>&1; then
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
-    chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR"
 fi
-chmod 750 "$CONFIG_DIR"
 chmod 640 "$CONFIG_FILE" || true
 systemctl restart "$SERVICE_NAME"
 echo "  Сервис перезапущен"

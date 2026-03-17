@@ -94,15 +94,15 @@ events_policy:
   enable_gps_reject_events: true
   enable_unknown_register_events: true
 
-# ---------- Retention (очистка) — tiered ------------------------------------
+# ---------- Retention (очистка) — только информационно ----------------------
+# TimescaleDB Retention Policies устанавливаются в schema.sql через setup_db.py.
+# Изменение значений здесь НЕ влияет на уже запущенные политики в БД.
+# Для пересмотра политик пересоздайте схему: python scripts/setup_db.py --drop
 retention:
-  gps_raw_hours: 72
-  history_raw_days: 30        # raw data:30 дней (было history_days: 30)
+  gps_raw_days: 3             # GPS raw: 3 суток
+  history_raw_days: 30        # raw history: 30 дней
   history_1min_days: 30       # 1-мин агрегаты: 30 дней
-  history_1hour_days: 365     # 1-час агрегаты: 1 год
-  events_days: 90
-  cleanup_interval_hours: 24
-  batch_size: 10000           # было 5000; увеличено для 50+ двигателей
+  history_1hour_years: 1      # 1-час агрегаты: 1 год
 
 # ---------- Health endpoint ---------------------------------------------------
 health:
