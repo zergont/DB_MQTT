@@ -137,7 +137,6 @@ python -m src --config config.yml
 
 Ожидаемый вывод:
 ```
-2025-01-01 12:00:00  INFO     [cg.config]  Config loaded from config.yml
 2025-01-01 12:00:00  INFO     [cg.db]      PG pool created  min=2 max=10
 2025-01-01 12:00:00  INFO     [cg.main]    Restored GPS state for 0 objects
 2025-01-01 12:00:00  INFO     [cg.main]    Connecting to MQTT localhost:1883 …
