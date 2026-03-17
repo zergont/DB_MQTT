@@ -1,5 +1,4 @@
-""" CG DB-Writer — слой работы с PostgreSQL (asyncpg).
-"""
+"""CG DB-Writer v2.0.0 — слой работы с PostgreSQL/TimescaleDB (asyncpg)."""
 
 from __future__ import annotations
 
@@ -45,9 +44,9 @@ def pool() -> asyncpg.Pool:
     return _pool
 
 
-# ---------------------------------------------------------------------------
-# Objects / Equipment upsert
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Objects / Equipment
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def upsert_object(conn: asyncpg.Connection, router_sn: str) -> None:
     await conn.execute(
@@ -72,15 +71,13 @@ async def upsert_equipment(
         ON CONFLICT (router_sn, equip_type, panel_id)
         DO UPDATE SET last_seen_at = now()
         """,
-        router_sn,
-        equip_type,
-        panel_id,
+        router_sn, equip_type, panel_id,
     )
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # GPS
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def insert_gps_raw(
     conn: asyncpg.Connection,
@@ -99,14 +96,7 @@ async def insert_gps_raw(
           (router_sn, gps_time, lat, lon, satellites, fix_status, accepted, reject_reason)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         """,
-        router_sn,
-        gps_time,
-        lat,
-        lon,
-        satellites,
-        fix_status,
-        accepted,
-        reject_reason,
+        router_sn, gps_time, lat, lon, satellites, fix_status, accepted, reject_reason,
     )
 
 
@@ -132,12 +122,7 @@ async def upsert_gps_latest(
           satellites  = EXCLUDED.satellites,
           fix_status  = EXCLUDED.fix_status
         """,
-        router_sn,
-        gps_time,
-        lat,
-        lon,
-        satellites,
-        fix_status,
+        router_sn, gps_time, lat, lon, satellites, fix_status,
     )
 
 
@@ -151,15 +136,14 @@ async def get_gps_latest(
     )
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # Latest state
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
-    """Batch upsert latest_state rows.
+    """Batch upsert latest_state.
 
-    Tuple:
-        (router_sn, equip_type, panel_id, addr, ts, value, raw, text, unit, name, reason)
+    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw, text, unit, name, reason)
     """
     if not rows:
         return
@@ -169,13 +153,13 @@ async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple])
           (router_sn, equip_type, panel_id, addr, ts, value, raw, text, unit, name, reason, updated_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
         ON CONFLICT (router_sn, equip_type, panel_id, addr) DO UPDATE SET
-          ts = EXCLUDED.ts,
-          value = EXCLUDED.value,
-          raw = EXCLUDED.raw,
-          text = EXCLUDED.text,
-          unit = EXCLUDED.unit,
-          name = EXCLUDED.name,
-          reason = EXCLUDED.reason,
+          ts         = EXCLUDED.ts,
+          value      = EXCLUDED.value,
+          raw        = EXCLUDED.raw,
+          text       = EXCLUDED.text,
+          unit       = EXCLUDED.unit,
+          name       = EXCLUDED.name,
+          reason     = EXCLUDED.reason,
           updated_at = now()
         """,
         rows,
@@ -197,23 +181,20 @@ async def get_latest_state_rows_many(
         SELECT * FROM latest_state
         WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3 AND addr = ANY($4::int[])
         """,
-        router_sn,
-        equip_type,
-        panel_id,
-        addrs,
+        router_sn, equip_type, panel_id, addrs,
     )
     return {int(r["addr"]): r for r in rows}
 
 
-# ---------------------------------------------------------------------------
-# History
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# History (аналоговые регистры → TimescaleDB hypertable)
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def insert_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
-    """Batch insert history rows.
+    """Batch insert в history (аналоговые регистры).
 
-    Each tuple:
-        (router_sn, equip_type, panel_id, addr, ts, value, raw, text, reason, write_reason)
+    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw, text, reason, write_reason)
+    ts — NOT NULL (TimescaleDB hypertable partition key).
     """
     if not rows:
         return
@@ -227,9 +208,51 @@ async def insert_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> N
     )
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# State events (дискретные / enum регистры → plain PostgreSQL)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def insert_state_event_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+    """Batch insert в state_events.
+
+    Tuple: (router_sn, equip_type, panel_id, addr, ts, raw, text, write_reason)
+    """
+    if not rows:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO state_events
+          (router_sn, equip_type, panel_id, addr, ts, raw, text, write_reason)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        """,
+        rows,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameter history (уставки / настройки → plain PostgreSQL)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def insert_parameter_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+    """Batch insert в parameter_history.
+
+    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw, text)
+    """
+    if not rows:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO parameter_history
+          (router_sn, equip_type, panel_id, addr, ts, value, raw, text)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        """,
+        rows,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Events
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def insert_event(
     conn: asyncpg.Connection,
@@ -246,20 +269,14 @@ async def insert_event(
         INSERT INTO events (router_sn, equip_type, panel_id, type, description, payload)
         VALUES ($1,$2,$3,$4,$5,$6::jsonb)
         """,
-        router_sn,
-        equip_type,
-        panel_id,
-        event_type,
-        description,
-        payload_json,
+        router_sn, equip_type, panel_id, event_type, description, payload_json,
     )
 
 
 async def insert_event_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
     """Batch insert events.
 
-    Each tuple:
-        (router_sn, equip_type, panel_id, type, description, payload_json_str_or_none)
+    Tuple: (router_sn, equip_type, panel_id, type, description, payload_json_str_or_none)
     """
     if not rows:
         return
@@ -272,126 +289,9 @@ async def insert_event_batch(conn: asyncpg.Connection, rows: list[tuple]) -> Non
     )
 
 
-# ---------------------------------------------------------------------------
-# Retention / cleanup
-# ---------------------------------------------------------------------------
-
-async def cleanup_gps_raw(conn: asyncpg.Connection, hours: int, batch: int) -> int:
-    total = 0
-    while True:
-        tag = await conn.execute(
-            """
-            DELETE FROM gps_raw_history WHERE id IN (
-              SELECT id FROM gps_raw_history
-              WHERE received_at < now() - make_interval(hours => $1)
-              ORDER BY id
-              LIMIT $2
-            )
-            """,
-            hours,
-            batch,
-        )
-        n = int(tag.split()[-1])
-        total += n
-        if n < batch:
-            break
-    return total
-
-
-async def cleanup_history_raw(
-    conn: asyncpg.Connection,
-    cutoff: datetime,
-    batch: int,
-) -> int:
-    """Delete raw history older than cutoff (by received_at)."""
-    total = 0
-    while True:
-        tag = await conn.execute(
-            """
-            DELETE FROM history WHERE id IN (
-              SELECT id FROM history
-              WHERE received_at < $1
-              ORDER BY id
-              LIMIT $2
-            )
-            """,
-            cutoff,
-            batch,
-        )
-        n = int(tag.split()[-1])
-        total += n
-        if n < batch:
-            break
-    return total
-
-
-async def cleanup_history_1min(conn: asyncpg.Connection, days: int, batch: int) -> int:
-    total = 0
-    while True:
-        tag = await conn.execute(
-            """
-            DELETE FROM history_1min WHERE ctid IN (
-              SELECT ctid FROM history_1min
-              WHERE ts < now() - make_interval(days => $1)
-              LIMIT $2
-            )
-            """,
-            days,
-            batch,
-        )
-        n = int(tag.split()[-1])
-        total += n
-        if n < batch:
-            break
-    return total
-
-
-async def cleanup_history_1hour(conn: asyncpg.Connection, days: int, batch: int) -> int:
-    total = 0
-    while True:
-        tag = await conn.execute(
-            """
-            DELETE FROM history_1hour WHERE ctid IN (
-              SELECT ctid FROM history_1hour
-              WHERE ts < now() - make_interval(days => $1)
-              LIMIT $2
-            )
-            """,
-            days,
-            batch,
-        )
-        n = int(tag.split()[-1])
-        total += n
-        if n < batch:
-            break
-    return total
-
-
-async def cleanup_events(conn: asyncpg.Connection, days: int, batch: int) -> int:
-    total = 0
-    while True:
-        tag = await conn.execute(
-            """
-            DELETE FROM events WHERE id IN (
-              SELECT id FROM events
-              WHERE created_at < now() - make_interval(days => $1)
-              ORDER BY id
-              LIMIT $2
-            )
-            """,
-            days,
-            batch,
-        )
-        n = int(tag.split()[-1])
-        total += n
-        if n < batch:
-            break
-    return total
-
-
-# ---------------------------------------------------------------------------
-# Register catalog lookup
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Register catalog
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def get_register_catalog_rows_many(
     conn: asyncpg.Connection,
@@ -406,86 +306,6 @@ async def get_register_catalog_rows_many(
         SELECT * FROM register_catalog
         WHERE equip_type = $1 AND addr = ANY($2::int[])
         """,
-        equip_type,
-        addrs,
+        equip_type, addrs,
     )
     return {int(r["addr"]): r for r in rows}
-
-
-# ---------------------------------------------------------------------------
-# Aggregation (history → 1min → 1hour)
-# ---------------------------------------------------------------------------
-
-async def aggregate_to_1min(
-    conn: asyncpg.Connection,
-    minute_start: datetime,
-    minute_end: datetime,
-) -> int:
-    """Агрегировать raw history за [minute_start, minute_end) в history_1min.
-
-    Возвращает количество upsert-нутых групп.
-    """
-    tag = await conn.execute(
-        """
-        INSERT INTO history_1min
-            (router_sn, equip_type, panel_id, addr, ts,
-             avg_value, min_value, max_value, sample_count)
-        SELECT
-            router_sn, equip_type, panel_id, addr,
-            date_trunc('minute', ts) AS ts,
-            avg(value)  AS avg_value,
-            min(value)  AS min_value,
-            max(value)  AS max_value,
-            count(value) AS sample_count
-        FROM history
-        WHERE ts >= $1 AND ts < $2
-        GROUP BY 1, 2, 3, 4, 5
-        ON CONFLICT (router_sn, equip_type, panel_id, addr, ts)
-        DO UPDATE SET
-            avg_value    = EXCLUDED.avg_value,
-            min_value    = EXCLUDED.min_value,
-            max_value    = EXCLUDED.max_value,
-            sample_count = EXCLUDED.sample_count
-        """,
-        minute_start,
-        minute_end,
-    )
-    return int(tag.split()[-1])
-
-
-async def aggregate_to_1hour(
-    conn: asyncpg.Connection,
-    hour_start: datetime,
-    hour_end: datetime,
-) -> int:
-    """Агрегировать history_1min за [hour_start, hour_end) в history_1hour.
-
-    Использует weighted average по sample_count для точного среднего.
-    Возвращает количество upsert-нутых групп.
-    """
-    tag = await conn.execute(
-        """
-        INSERT INTO history_1hour
-            (router_sn, equip_type, panel_id, addr, ts,
-             avg_value, min_value, max_value, sample_count)
-        SELECT
-            router_sn, equip_type, panel_id, addr,
-            date_trunc('hour', ts) AS ts,
-            SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0) AS avg_value,
-            MIN(min_value) AS min_value,
-            MAX(max_value) AS max_value,
-            SUM(sample_count) AS sample_count
-        FROM history_1min
-        WHERE ts >= $1 AND ts < $2
-        GROUP BY 1, 2, 3, 4, 5
-        ON CONFLICT (router_sn, equip_type, panel_id, addr, ts)
-        DO UPDATE SET
-            avg_value    = EXCLUDED.avg_value,
-            min_value    = EXCLUDED.min_value,
-            max_value    = EXCLUDED.max_value,
-            sample_count = EXCLUDED.sample_count
-        """,
-        hour_start,
-        hour_end,
-    )
-    return int(tag.split()[-1])

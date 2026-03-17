@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Проверка здоровья CG DB-Writer: подключения, таблицы, данные.
+"""CG DB-Writer v2.0.0 — проверка здоровья системы.
 
 Использование:
   python scripts/check_health.py --config config.yml
 
 Проверяет:
-  1) PostgreSQL — подключение + наличие таблиц + счётчики строк
-  2) MQTT — подключение (быстрая попытка)
-  3) Свежесть данных — когда последний раз что-то записывалось
+  1. PostgreSQL — подключение, таблицы, Continuous Aggregates, свежесть данных
+  2. MQTT — подключение
 """
 
 import argparse
@@ -28,7 +27,12 @@ EXPECTED_TABLES = [
     "gps_latest_filtered",
     "latest_state",
     "history",
+    "state_events",
+    "parameter_history",
     "events",
+]
+
+EXPECTED_VIEWS = [
     "history_1min",
     "history_1hour",
 ]
@@ -36,76 +40,104 @@ EXPECTED_TABLES = [
 
 async def check_postgres(cfg) -> bool:
     pg = cfg.postgres
-    import asyncpg  # type: ignore
+    import asyncpg
 
     print("=" * 60)
-    print("PostgreSQL")
+    print("PostgreSQL / TimescaleDB")
     print("=" * 60)
-    print(f" host: {pg.host}:{pg.port} db: {pg.dbname} user: {pg.user}")
+    print(f"  host: {pg.host}:{pg.port}  db: {pg.dbname}  user: {pg.user}")
 
     try:
         conn = await asyncpg.connect(
-            host=pg.host,
-            port=pg.port,
+            host=pg.host, port=pg.port,
             database=pg.dbname,
-            user=pg.user,
-            password=pg.password,
+            user=pg.user, password=pg.password,
         )
     except Exception as e:
-        print(f" ОШИБКА: {e}")
+        print(f"  ОШИБКА подключения: {e}")
         return False
 
-    print(" Подключение: OK")
+    print("  Подключение: OK")
 
-    rows = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-    existing = {r["tablename"] for r in rows}
-    missing = [t for t in EXPECTED_TABLES if t not in existing]
-    if missing:
-        print(f" ОТСУТСТВУЮТ таблицы: {', '.join(missing)}")
-        print(" Запустите: python scripts/setup_db.py --config config.yml")
+    # TimescaleDB
+    ts_ver = await conn.fetchval(
+        "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"
+    )
+    if ts_ver:
+        print(f"  TimescaleDB: {ts_ver}")
+    else:
+        print("  TimescaleDB: НЕ УСТАНОВЛЕН — запустите setup_db.py")
         await conn.close()
         return False
 
-    print(" Таблицы: все на месте")
+    # Таблицы
+    existing_tables = {
+        r["tablename"]
+        for r in await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+    }
+    existing_views = {
+        r["matviewname"]
+        for r in await conn.fetch("SELECT matviewname FROM pg_matviews WHERE schemaname = 'public'")
+    }
+
+    missing_t = [t for t in EXPECTED_TABLES if t not in existing_tables]
+    missing_v = [v for v in EXPECTED_VIEWS  if v not in existing_views]
+
+    if missing_t or missing_v:
+        if missing_t:
+            print(f"  ОТСУТСТВУЮТ таблицы: {', '.join(missing_t)}")
+        if missing_v:
+            print(f"  ОТСУТСТВУЮТ вью: {', '.join(missing_v)}")
+        print("  Запустите: python scripts/setup_db.py --config config.yml")
+        await conn.close()
+        return False
+
+    print("  Таблицы и CA: все на месте")
+
+    # Данные
     print()
-    print(" Данные в таблицах:")
+    print("  Данные:")
+    checks = [
+        ("history",          "SELECT count(*), max(received_at) FROM history"),
+        ("history_1min",     "SELECT count(*) FROM history_1min"),
+        ("history_1hour",    "SELECT count(*) FROM history_1hour"),
+        ("state_events",     "SELECT count(*), max(received_at) FROM state_events"),
+        ("parameter_history","SELECT count(*), max(received_at) FROM parameter_history"),
+        ("gps_raw_history",  "SELECT count(*), max(received_at) FROM gps_raw_history"),
+        ("latest_state",     "SELECT count(*), max(updated_at)  FROM latest_state"),
+        ("events",           "SELECT count(*), max(created_at)  FROM events"),
+        ("objects",          "SELECT count(*) FROM objects"),
+    ]
 
-    for t in EXPECTED_TABLES:
-        count = await conn.fetchval(f'SELECT count(*) FROM "{t}"')
-        suffix = ""
+    for name, sql in checks:
+        try:
+            row = await conn.fetchrow(sql)
+            count = row[0]
+            ts    = row[1] if len(row) > 1 else None
+            suffix = ""
+            if ts:
+                age = (datetime.now(timezone.utc) - ts).total_seconds()
+                suffix = f"  (последняя {age:.0f}s назад)"
+            print(f"    {name:20s} {count:>10,}{suffix}")
+        except Exception as e:
+            print(f"    {name:20s}  ERROR: {e}")
 
-        if t == "gps_raw_history" and count > 0:
-            last = await conn.fetchval("SELECT max(received_at) FROM gps_raw_history")
-            if last:
-                age = (datetime.now(timezone.utc) - last).total_seconds()
-                suffix = f" (последняя запись {age:.0f}s назад)"
-        elif t == "latest_state" and count > 0:
-            last = await conn.fetchval("SELECT max(updated_at) FROM latest_state")
-            if last:
-                age = (datetime.now(timezone.utc) - last).total_seconds()
-                suffix = f" (обновлено {age:.0f}s назад)"
-        elif t == "history" and count > 0:
-            last = await conn.fetchval("SELECT max(received_at) FROM history")
-            if last:
-                age = (datetime.now(timezone.utc) - last).total_seconds()
-                suffix = f" (последняя {age:.0f}s назад)"
-        elif t == "events" and count > 0:
-            last = await conn.fetchval("SELECT max(created_at) FROM events")
-            if last:
-                age = (datetime.now(timezone.utc) - last).total_seconds()
-                suffix = f" (последнее {age:.0f}s назад)"
-        elif t == "history_1min" and count > 0:
-            last = await conn.fetchval("SELECT max(ts) FROM history_1min")
-            if last:
-                age = (datetime.now(timezone.utc) - last).total_seconds()
-                suffix = f" (последняя {age:.0f}s назад)"
-        elif t == "history_1hour" and count > 0:
-            last = await conn.fetchval("SELECT max(ts) FROM history_1hour")
-            if last:
-                age = (datetime.now(timezone.utc) - last).total_seconds()
-                suffix = f" (последняя {age:.0f}s назад)"
-
-        print(f" {t:30s} {count:>8d}{suffix}")
+    # Retention jobs
+    jobs = await conn.fetch(
+        """
+        SELECT application_name, next_start, last_run_status
+        FROM timescaledb_information.jobs
+        WHERE application_name LIKE '%Retention%'
+           OR application_name LIKE '%Compression%'
+           OR application_name LIKE '%Continuous%'
+        ORDER BY application_name
+        """
+    )
+    if jobs:
+        print()
+        print("  TimescaleDB jobs:")
+        for j in jobs:
+            print(f"    {j['application_name'][:40]:40s}  next={j['next_start']}  last={j['last_run_status']}")
 
     await conn.close()
     return True
@@ -117,12 +149,12 @@ async def check_mqtt(cfg) -> bool:
     print("=" * 60)
     print("MQTT")
     print("=" * 60)
-    print(f" host: {mc.host}:{mc.port} user: {mc.user or '(anonymous)'}")
+    print(f"  host: {mc.host}:{mc.port}  user: {mc.user or '(anonymous)'}")
 
     try:
-        import aiomqtt  # type: ignore
+        import aiomqtt
     except ImportError:
-        print(" ПРОПУЩЕНО: aiomqtt не установлен")
+        print("  ПРОПУЩЕНО: aiomqtt не установлен")
         return False
 
     try:
@@ -136,38 +168,35 @@ async def check_mqtt(cfg) -> bool:
             tls_params=aiomqtt.TLSParameters() if mc.tls else None,
         ):
             pass
-        print(" Подключение: OK")
+        print("  Подключение: OK")
         return True
     except Exception as e:
-        print(f" ОШИБКА: {e}")
+        print(f"  ОШИБКА: {e}")
         return False
 
 
-async def main(config_path: str) -> None:
+async def main_async(config_path: str) -> None:
     cfg = load_config(config_path)
-    print()
-    pg_ok = await check_postgres(cfg)
+    pg_ok   = await check_postgres(cfg)
     mqtt_ok = await check_mqtt(cfg)
 
     print()
     print("=" * 60)
     print("ИТОГО")
     print("=" * 60)
-    print(f" PostgreSQL: {'OK' if pg_ok else 'ОШИБКА'}")
-    print(f" MQTT: {'OK' if mqtt_ok else 'ОШИБКА'}")
+    print(f"  PostgreSQL/TimescaleDB: {'OK' if pg_ok   else 'ОШИБКА'}")
+    print(f"  MQTT:                   {'OK' if mqtt_ok else 'ОШИБКА'}")
 
     if pg_ok and mqtt_ok:
-        print()
-        print(" Всё в порядке! DB-Writer может работать.")
+        print("\n  Всё в порядке! DB-Writer v2.0.0 готов к работе.")
         return
 
-    print()
-    print(" Есть проблемы.\n Исправьте ошибки выше.")
+    print("\n  Есть проблемы. Исправьте ошибки выше.")
     raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="CG DB-Writer health check")
-    p.add_argument("-c", "--config", default="config.yml", help="Путь к config.yml (default: config.yml)")
+    p = argparse.ArgumentParser(description="CG DB-Writer v2.0.0 health check")
+    p.add_argument("-c", "--config", default="config.yml")
     args = p.parse_args()
-    asyncio.run(main(args.config))
+    asyncio.run(main_async(args.config))

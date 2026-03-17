@@ -1,6 +1,4 @@
-"""
-CG DB-Writer — логика решения «писать ли в history».
-"""
+"""CG DB-Writer v2.0.0 — логика решения «писать ли в history / state_events»."""
 
 from __future__ import annotations
 
@@ -18,7 +16,8 @@ class _RegParams:
     min_interval_sec: int
     heartbeat_sec: int
     store_history: bool
-    value_kind: str  # analog | discrete | …
+    value_kind: str    # analog | discrete | enum | parameter | …
+    register_kind: str # analog | discrete | enum | parameter
 
 
 def resolve_params(
@@ -26,19 +25,22 @@ def resolve_params(
     equip_type: str,
     addr: int,
     catalog_row: Any | None,
+    kpi_map: dict[tuple[str, int], Any],
 ) -> _RegParams:
-    """Определить параметры для addr: catalog → kpi → defaults."""
+    """Определить параметры для addr: catalog → kpi → defaults.
+
+    kpi_map передаётся снаружи (вычислен один раз на сообщение).
+    """
     d = cfg.history_policy.defaults
-    kpi_map = cfg.history_policy.kpi_map()
 
-    # Начинаем с дефолтов
-    tolerance: float | None = d.tolerance_analog
+    tolerance    = d.tolerance_analog
     min_interval = d.min_interval_sec
-    heartbeat = d.heartbeat_sec
-    store = d.store_history
-    vk = d.value_kind
+    heartbeat    = d.heartbeat_sec
+    store        = d.store_history
+    vk           = d.value_kind
+    rk           = "analog"   # register_kind default
 
-    # Перекрываем из register_catalog (если есть)
+    # Перекрываем из register_catalog
     if catalog_row is not None:
         if catalog_row["tolerance"] is not None:
             tolerance = float(catalog_row["tolerance"])
@@ -47,14 +49,15 @@ def resolve_params(
         if catalog_row["heartbeat_sec"] is not None:
             heartbeat = int(catalog_row["heartbeat_sec"])
         store = bool(catalog_row["store_history"])
-        vk = catalog_row["value_kind"] or vk
+        vk    = catalog_row["value_kind"] or vk
+        rk    = catalog_row["register_kind"] or rk
 
-    # Перекрываем из kpi_registers (ключ: equip_type + addr)
+    # Перекрываем из kpi_registers
     kpi = kpi_map.get((equip_type, addr))
     if kpi is not None:
         min_interval = kpi.min_interval_sec
-        heartbeat = kpi.heartbeat_sec
-        tolerance = kpi.tolerance
+        heartbeat    = kpi.heartbeat_sec
+        tolerance    = kpi.tolerance
 
     # Для дискретных/enum/text — tolerance не применяется
     if vk in ("discrete", "enum", "text"):
@@ -66,16 +69,17 @@ def resolve_params(
         heartbeat_sec=heartbeat,
         store_history=store,
         value_kind=vk,
+        register_kind=rk,
     )
 
 
 @dataclass
-class HistoryDecision:
+class WriteDecision:
     write: bool
     write_reason: str = ""
 
 
-def should_write_history(
+def should_write(
     params: _RegParams,
     *,
     new_value: Any,
@@ -86,23 +90,29 @@ def should_write_history(
     prev_raw: int | None,
     prev_text: str | None,
     prev_reason: str | None,
-    last_history_ts: datetime | None,
+    last_write_ts: datetime | None,
     now: datetime,
-) -> HistoryDecision:
-    """Решает, нужно ли писать запись в history."""
+    use_heartbeat: bool = True,
+) -> WriteDecision:
+    """Решает, нужно ли писать запись.
 
+    Используется для:
+      - аналоговых регистров (history):          use_heartbeat=True
+      - дискретных/enum регистров (state_events): use_heartbeat=True
+      - параметров (parameter_history):           use_heartbeat=False
+    """
     if not params.store_history:
-        return HistoryDecision(False)
+        return WriteDecision(False)
 
     elapsed: float | None = None
-    if last_history_ts is not None:
-        elapsed = (now - last_history_ts).total_seconds()
+    if last_write_ts is not None:
+        elapsed = (now - last_write_ts).total_seconds()
 
-    # B) min_interval — даже если есть изменение, не чаще
+    # Минимальный интервал — защита от flood
     if elapsed is not None and elapsed < params.min_interval_sec:
-        return HistoryDecision(False)
+        return WriteDecision(False)
 
-    # A) Change rule
+    # Детектирование изменения
     changed = False
     if new_raw != prev_raw:
         changed = True
@@ -119,16 +129,15 @@ def should_write_history(
                 if abs(nv - pv) > params.tolerance:
                     changed = True
             elif nv != pv:
-                # Одно None, другое нет
                 changed = True
         except (TypeError, ValueError):
             pass
 
     if changed:
-        return HistoryDecision(True, "change")
+        return WriteDecision(True, "change")
 
-    # C) Heartbeat rule
-    if elapsed is None or elapsed >= params.heartbeat_sec:
-        return HistoryDecision(True, "heartbeat")
+    # Heartbeat — запись для детекции gap'ов
+    if use_heartbeat and (elapsed is None or elapsed >= params.heartbeat_sec):
+        return WriteDecision(True, "heartbeat")
 
-    return HistoryDecision(False)
+    return WriteDecision(False)

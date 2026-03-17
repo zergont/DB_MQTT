@@ -1,8 +1,7 @@
-""" CG DB-Writer — главная точка входа.
+"""CG DB-Writer v2.0.0 — главная точка входа.
 
 Использование:
   python -m src.main --config config.yml
-  python -m src.main --config config.yml --cleanup   (только очистка, без MQTT)
 """
 
 from __future__ import annotations
@@ -17,19 +16,17 @@ from datetime import datetime, timezone
 import aiomqtt
 
 from src import db
-from src.aggregation import aggregation_loop
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
-from src.handlers import dispatch, get_gps_filter, restore_history_timestamps
+from src.handlers import dispatch, get_gps_filter, restore_write_timestamps
 from src.health import HealthState, health_loop
 from src.log import setup_logging
-from src.retention import do_cleanup, retention_loop
 from src.version import get_version
 from src.watchdog import watchdog_loop
 
 logger = logging.getLogger("cg.main")
 
-# Shared state for watchdog
+# Shared state для watchdog
 _last_seen: dict[str, datetime] = {}
 _panel_last_seen: dict[tuple[str, int], datetime] = {}
 
@@ -42,29 +39,27 @@ class _IngestItem:
 
 
 def _touch_last_seen(topic: str) -> None:
-    """Обновить last_seen на момент получения сообщения (не на момент записи в БД).
+    """Обновить last_seen при получении сообщения (не при записи в БД).
 
-    Это важно: если БД временно тормозит, watchdog не должен считать объект offline,
-    если сообщения продолжают приходить.
+    Watchdog должен видеть живое устройство даже если БД тормозит.
     """
     now = datetime.now(timezone.utc)
     parts = topic.split("/")
+
     # telemetry: cg/v1/telemetry/SN/<sn>
     if len(parts) == 5 and parts[0] == "cg" and parts[2] == "telemetry" and parts[3] == "SN":
-        sn = parts[4]
-        _last_seen[sn] = now
+        _last_seen[parts[4]] = now
         return
 
     # decoded: cg/v1/decoded/SN/<sn>/pcc/<panel_id>
     if len(parts) == 7 and parts[0] == "cg" and parts[2] == "decoded" and parts[3] == "SN" and parts[5] == "pcc":
         sn = parts[4]
+        _last_seen[sn] = now
         try:
             panel_id = int(parts[6])
-        except ValueError:
-            panel_id = None
-        _last_seen[sn] = now
-        if panel_id is not None:
             _panel_last_seen[(sn, panel_id)] = now
+        except ValueError:
+            pass
 
 
 async def _restore_gps_state(cfg: AppConfig) -> None:
@@ -75,15 +70,12 @@ async def _restore_gps_state(cfg: AppConfig) -> None:
             flt = get_gps_filter(r["router_sn"], cfg)
             flt.set_initial(
                 GpsPoint(
-                    lat=r["lat"],
-                    lon=r["lon"],
-                    satellites=r["satellites"],
-                    fix_status=r["fix_status"],
-                    gps_time=r["gps_time"],
-                    received_at=r["received_at"],
+                    lat=r["lat"], lon=r["lon"],
+                    satellites=r["satellites"], fix_status=r["fix_status"],
+                    gps_time=r["gps_time"], received_at=r["received_at"],
                 )
             )
-        logger.info("Restored GPS state for %d objects", len(rows))
+    logger.info("Restored GPS state for %d objects", len(rows))
 
 
 async def _queue_put(
@@ -99,27 +91,28 @@ async def _queue_put(
         q.put_nowait(item)
         return
     except asyncio.QueueFull:
-        if not drop_when_full:
-            # блокируемся, т.е. делаем backpressure
-            logger.warning("Queue %s full; blocking put (size=%d)", log_name, q.qsize())
-            await q.put(item)
-            return
+        pass
 
-        if drop_policy == "drop_new":
-            logger.warning("Queue %s full; dropped NEW message topic=%s", log_name, item.topic)
-            return
+    if not drop_when_full:
+        logger.warning("Queue %s full; blocking put (size=%d)", log_name, q.qsize())
+        await q.put(item)
+        return
 
-        # drop_oldest (по умолчанию)
-        try:
-            _ = q.get_nowait()
-            q.task_done()
-        except asyncio.QueueEmpty:
-            pass
-        try:
-            q.put_nowait(item)
-            logger.warning("Queue %s full; dropped OLDEST and enqueued NEW topic=%s", log_name, item.topic)
-        except asyncio.QueueFull:
-            logger.warning("Queue %s still full after drop; dropped NEW topic=%s", log_name, item.topic)
+    if drop_policy == "drop_new":
+        logger.warning("Queue %s full; dropped NEW message topic=%s", log_name, item.topic)
+        return
+
+    # drop_oldest (по умолчанию)
+    try:
+        q.get_nowait()
+        q.task_done()
+    except asyncio.QueueEmpty:
+        pass
+    try:
+        q.put_nowait(item)
+        logger.warning("Queue %s full; dropped OLDEST, enqueued NEW topic=%s", log_name, item.topic)
+    except asyncio.QueueFull:
+        logger.warning("Queue %s still full after drop; dropped NEW topic=%s", log_name, item.topic)
 
 
 async def _mqtt_ingest_loop(
@@ -127,7 +120,7 @@ async def _mqtt_ingest_loop(
     q_telemetry: asyncio.Queue[_IngestItem],
     q_decoded: asyncio.Queue[_IngestItem],
 ) -> None:
-    """Подключение к MQTT и запись сообщений в очереди (без тяжёлой логики)."""
+    """Подключение к MQTT и распределение сообщений по очередям."""
     mc = cfg.mqtt
     ic = cfg.ingest
 
@@ -146,11 +139,7 @@ async def _mqtt_ingest_loop(
             ) as client:
                 await client.subscribe(mc.sub_decoded)
                 await client.subscribe(mc.sub_telemetry)
-                logger.info(
-                    "MQTT connected, subscribed: %s, %s",
-                    mc.sub_decoded,
-                    mc.sub_telemetry,
-                )
+                logger.info("MQTT connected, subscribed: %s, %s", mc.sub_decoded, mc.sub_telemetry)
                 delay = mc.reconnect_min_delay
 
                 async for msg in client.messages:
@@ -158,30 +147,25 @@ async def _mqtt_ingest_loop(
                     payload = msg.payload
                     if not isinstance(payload, bytes):
                         payload = str(payload).encode()
-                    if not payload:
-                        payload = b""
 
                     _touch_last_seen(topic)
 
                     item = _IngestItem(
                         topic=topic,
-                        payload=payload,
+                        payload=payload or b"",
                         received_at=datetime.now(timezone.utc),
                     )
 
                     if topic.startswith("cg/v1/telemetry/"):
-                        # telemetry важнее; очередь маленькая, переполняться не должна
                         await _queue_put(
-                            q_telemetry,
-                            item,
+                            q_telemetry, item,
                             drop_when_full=False,
                             drop_policy="drop_oldest",
                             log_name="telemetry",
                         )
                     else:
                         await _queue_put(
-                            q_decoded,
-                            item,
+                            q_decoded, item,
                             drop_when_full=ic.drop_decoded_when_full,
                             drop_policy=ic.drop_decoded_policy,
                             log_name="decoded",
@@ -206,18 +190,15 @@ async def _worker_loop(
     """DB-воркер: вытаскивает из очередей и пишет в БД.
 
     Приоритет: telemetry → decoded.
-    Ретрай: только если dispatch падает исключением (обычно временная ошибка БД).
+    Ретрай при временных ошибках БД.
     """
     ic = cfg.ingest
     logger.info(
         "Worker-%d started (retries=%d, delay=%.1fs)",
-        worker_id,
-        ic.worker_max_retries,
-        ic.worker_retry_delay_sec,
+        worker_id, ic.worker_max_retries, ic.worker_retry_delay_sec,
     )
 
     while True:
-        # telemetry always first (важно для GPS и router_last_seen)
         src = "telemetry"
         try:
             item = q_telemetry.get_nowait()
@@ -238,23 +219,16 @@ async def _worker_loop(
                     attempt += 1
                     if attempt > ic.worker_max_retries:
                         logger.exception(
-                            "Worker-%d: failed processing topic=%s after %d retries",
-                            worker_id,
-                            item.topic,
-                            ic.worker_max_retries,
+                            "Worker-%d: failed topic=%s after %d retries",
+                            worker_id, item.topic, ic.worker_max_retries,
                         )
                         break
                     logger.warning(
-                        "Worker-%d: error on topic=%s (%s); retry in %.1fs (%d/%d)",
-                        worker_id,
-                        item.topic,
-                        type(e).__name__,
-                        ic.worker_retry_delay_sec,
-                        attempt,
-                        ic.worker_max_retries,
+                        "Worker-%d: error topic=%s (%s); retry in %.1fs (%d/%d)",
+                        worker_id, item.topic, type(e).__name__,
+                        ic.worker_retry_delay_sec, attempt, ic.worker_max_retries,
                     )
                     await asyncio.sleep(ic.worker_retry_delay_sec)
-
         finally:
             if src == "telemetry":
                 q_telemetry.task_done()
@@ -266,28 +240,27 @@ async def _run(cfg: AppConfig) -> None:
     """Запускает все подсистемы."""
     await db.init_pool(cfg.postgres)
 
-    # Очереди
     q_telemetry: asyncio.Queue[_IngestItem] = asyncio.Queue(maxsize=cfg.ingest.telemetry_queue_maxsize)
-    q_decoded: asyncio.Queue[_IngestItem] = asyncio.Queue(maxsize=cfg.ingest.decoded_queue_maxsize)
+    q_decoded:   asyncio.Queue[_IngestItem] = asyncio.Queue(maxsize=cfg.ingest.decoded_queue_maxsize)
     health_state = HealthState(q_decoded=q_decoded, q_telemetry=q_telemetry)
 
     try:
         await _restore_gps_state(cfg)
-        await restore_history_timestamps()
+        await restore_write_timestamps()
 
         tasks: list[asyncio.Task] = [
             asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded), name="mqtt_ingest"),
-            asyncio.create_task(watchdog_loop(cfg, _last_seen, _panel_last_seen), name="watchdog"),
-            asyncio.create_task(retention_loop(cfg.retention), name="retention"),
-            asyncio.create_task(aggregation_loop(), name="aggregation"),
+            asyncio.create_task(watchdog_loop(cfg, _last_seen, _panel_last_seen),  name="watchdog"),
         ]
 
         if cfg.health.enabled:
             tasks.append(asyncio.create_task(health_loop(cfg.health, health_state), name="health_loop"))
 
-        # Воркеры (DB writers)
-        for i in range(max(1, int(cfg.ingest.worker_count))):
-            tasks.append(asyncio.create_task(_worker_loop(i + 1, cfg, q_telemetry, q_decoded, health_state), name=f"worker_{i+1}"))
+        for i in range(max(1, cfg.ingest.worker_count)):
+            tasks.append(asyncio.create_task(
+                _worker_loop(i + 1, cfg, q_telemetry, q_decoded, health_state),
+                name=f"worker_{i + 1}",
+            ))
 
         health_state.worker_tasks = tuple(t for t in tasks if t.get_name().startswith("worker_"))
 
@@ -309,15 +282,6 @@ async def _run(cfg: AppConfig) -> None:
         await db.close_pool()
 
 
-async def _run_cleanup(cfg: AppConfig) -> None:
-    """Однократная очистка (CLI)."""
-    await db.init_pool(cfg.postgres)
-    try:
-        await do_cleanup(cfg.retention)
-    finally:
-        await db.close_pool()
-
-
 def _shutdown(loop: asyncio.AbstractEventLoop) -> None:
     logger.info("Shutdown signal received")
     for task in asyncio.all_tasks(loop):
@@ -325,17 +289,11 @@ def _shutdown(loop: asyncio.AbstractEventLoop) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CG DB-Writer")
+    parser = argparse.ArgumentParser(description="CG DB-Writer v2.0.0")
     parser.add_argument(
-        "-c",
-        "--config",
+        "-c", "--config",
         default="config.yml",
         help="Path to config.yml (default: config.yml)",
-    )
-    parser.add_argument(
-        "--cleanup",
-        action="store_true",
-        help="Run retention cleanup once and exit",
     )
     args = parser.parse_args()
 
@@ -343,17 +301,12 @@ def main() -> None:
     setup_logging(cfg.logging)
     logger.info("Starting CG DB-Writer version %s", get_version())
 
-    if args.cleanup:
-        asyncio.run(_run_cleanup(cfg))
-        return
-
     loop = asyncio.new_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, _shutdown, loop)
         except NotImplementedError:
-            # Windows не поддерживает add_signal_handler
-            pass
+            pass   # Windows
 
     try:
         loop.run_until_complete(_run(cfg))
