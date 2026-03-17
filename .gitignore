@@ -31,3 +31,6 @@ ENV/
 .DS_Store
 Thumbs.db
 /DB_MQTT.sln
+
+# Claude Code
+.claude/
