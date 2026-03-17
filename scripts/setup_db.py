@@ -44,6 +44,59 @@ EXPECTED_VIEWS = [
 ]
 
 
+
+def _split_sql(sql: str) -> list[str]:
+    """Split SQL into individual statements, respecting dollar-quoted blocks ($$...$$)."""
+    statements: list[str] = []
+    current: list[str] = []
+    dollar_tag: str | None = None   # активный dollar-quote тег, напр. $$ или $func$
+    i = 0
+    n = len(sql)
+
+    while i < n:
+        # Начало или конец dollar-quoted блока
+        if dollar_tag is None and sql[i] == "$":
+            # Ищем закрывающий $
+            j = sql.find("$", i + 1)
+            if j != -1:
+                tag = sql[i : j + 1]
+                dollar_tag = tag
+                current.append(sql[i : j + 1])
+                i = j + 1
+                continue
+        elif dollar_tag is not None:
+            end = sql.find(dollar_tag, i)
+            if end != -1:
+                current.append(sql[i : end + len(dollar_tag)])
+                i = end + len(dollar_tag)
+                dollar_tag = None
+                continue
+
+        ch = sql[i]
+
+        # Разделитель команд — только вне dollar-quoted блоков
+        if ch == ";" and dollar_tag is None:
+            stmt = "".join(current).strip()
+            # Пропускаем пустые и чисто-комментарийные «команды»
+            lines = [l.strip() for l in stmt.splitlines() if l.strip() and not l.strip().startswith("--")]
+            if lines:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+
+        current.append(ch)
+        i += 1
+
+    # Хвост без финальной точки с запятой
+    stmt = "".join(current).strip()
+    lines = [l.strip() for l in stmt.splitlines() if l.strip() and not l.strip().startswith("--")]
+    if lines:
+        statements.append(stmt)
+
+    return statements
+
+
 async def setup(cfg, drop: bool) -> None:
     import asyncpg
 
@@ -98,8 +151,9 @@ async def setup(cfg, drop: bool) -> None:
 
         sql = SCHEMA_FILE.read_text(encoding="utf-8")
 
-        # Выполняем каждую команду отдельно (требование для некоторых TimescaleDB DDL)
-        statements = [s.strip() for s in sql.split(";") if s.strip() and not s.strip().startswith("--")]
+        # Выполняем каждую команду отдельно (требование для некоторых TimescaleDB DDL).
+        # Используем умный splitter: учитываем dollar-quoted блоки $$...$$ и строки.
+        statements = _split_sql(sql)
         total = len(statements)
         print(f"\nApplying schema ({total} statements)…")
 

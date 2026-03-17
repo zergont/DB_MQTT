@@ -7,19 +7,18 @@
 #   sudo ./scripts/install.sh
 #
 # Что делает:
-#   1) Проверяет Python 3.10+
+#   1) Проверяет Python 3.10+ и TimescaleDB
 #   2) Устанавливает PostgreSQL (если нет) и создаёт БД/пользователя
 #   3) Создаёт venv и ставит зависимости
-#   4) Копирует config.example.yml → /etc/db-writer/config.yml (если нет)
-#   5) Устанавливает systemd unit-файлы
+#   4) Копирует config.example.yml → /opt/db-writer/config.yml (если нет)
+#   5) Устанавливает systemd unit-файл
 # =============================================================================
 
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="/opt/db-writer"
-CONFIG_DIR="/etc/db-writer"
-CONFIG_FILE="$CONFIG_DIR/config.yml"
+CONFIG_FILE="$INSTALL_DIR/config.yml"
 SERVICE_USER="cg"
 
 echo "============================================="
@@ -30,7 +29,7 @@ echo ""
 # --- 1) Проверки ---
 echo "[1/6] Проверка зависимостей..."
 
-# Требуем Python 3.10+ (можно как python3.12, python3.13, так и python3 нужной версии)
+# Требуем Python 3.10+
 PYTHON_BIN=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
     if command -v "$candidate" &> /dev/null; then
@@ -63,19 +62,38 @@ if ! command -v psql &> /dev/null; then
     echo "  PostgreSQL установлен и запущен"
 else
     echo "  PostgreSQL: $(psql --version | head -1)"
-    # Убедимся что сервер запущен
     if ! systemctl is-active --quiet postgresql 2>/dev/null; then
         systemctl start postgresql
         echo "  PostgreSQL сервер запущен"
     fi
 fi
 
-# --- 1b) Создание БД и пользователя (если ещё нет) ---
+# Проверяем TimescaleDB
+TS_INSTALLED=$(sudo -u postgres psql -tAc \
+    "SELECT default_version FROM pg_available_extensions WHERE name='timescaledb'" 2>/dev/null || echo "")
+if [ -z "$TS_INSTALLED" ]; then
+    echo ""
+    echo "  ╔══════════════════════════════════════════════════════════════╗"
+    echo "  ║  ОШИБКА: TimescaleDB не установлен!                         ║"
+    echo "  ║                                                              ║"
+    echo "  ║  Установите TimescaleDB для вашей версии PostgreSQL:         ║"
+    echo "  ║  https://docs.timescale.com/self-hosted/latest/install/      ║"
+    echo "  ║                                                              ║"
+    echo "  ║  Пример для PostgreSQL 16 на Ubuntu:                        ║"
+    echo "  ║    apt install timescaledb-2-postgresql-16                   ║"
+    echo "  ║    timescaledb-tune --quiet --yes                            ║"
+    echo "  ║    systemctl restart postgresql                              ║"
+    echo "  ╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    exit 1
+fi
+echo "  TimescaleDB: $TS_INSTALLED"
+
+# --- 1b) Создание БД и пользователя ---
 PG_USER="cg_writer"
 PG_DB="cg_telemetry"
 PG_PASS="cg_writer"
 
-# Проверяем существует ли пользователь
 if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'" 2>/dev/null | grep -q 1; then
     echo "  PG пользователь '$PG_USER' уже существует"
 else
@@ -83,7 +101,6 @@ else
     echo "  PG пользователь '$PG_USER' создан (пароль: $PG_PASS)"
 fi
 
-# Проверяем существует ли БД
 if sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$PG_DB'" 2>/dev/null | grep -q 1; then
     echo "  БД '$PG_DB' уже существует"
 else
@@ -97,26 +114,22 @@ echo "[2/6] Копирование файлов в $INSTALL_DIR..."
 
 if [ "$REPO_DIR" != "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
-    cp -r "$REPO_DIR/src" "$INSTALL_DIR/"
-    cp -r "$REPO_DIR/schema" "$INSTALL_DIR/"
-    cp -r "$REPO_DIR/scripts" "$INSTALL_DIR/"
-    cp "$REPO_DIR/requirements.txt" "$INSTALL_DIR/"
+    cp -r "$REPO_DIR/src"      "$INSTALL_DIR/"
+    cp -r "$REPO_DIR/schema"   "$INSTALL_DIR/"
+    cp -r "$REPO_DIR/scripts"  "$INSTALL_DIR/"
+    cp "$REPO_DIR/requirements.txt"   "$INSTALL_DIR/"
     cp "$REPO_DIR/config.example.yml" "$INSTALL_DIR/"
-    cp "$REPO_DIR/VERSION" "$INSTALL_DIR/"
-    cp "$REPO_DIR/CHANGELOG.md" "$INSTALL_DIR/"
+    cp "$REPO_DIR/VERSION"            "$INSTALL_DIR/"
     echo "  Скопировано в $INSTALL_DIR"
 else
     echo "  Уже в $INSTALL_DIR, пропускаю"
 fi
-
-mkdir -p "$CONFIG_DIR"
 
 # --- 3) Virtual environment ---
 echo ""
 echo "[3/6] Создание venv и установка зависимостей..."
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-
 
 cd "$INSTALL_DIR"
 if [ ! -d "venv" ]; then
@@ -136,19 +149,20 @@ echo "[4/6] Конфигурация..."
 
 if [ ! -f "$CONFIG_FILE" ]; then
     cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
-    echo "  Создан $CONFIG_FILE (postgres: cg_writer/cg_writer)"
-    echo "  MQTT секция — заполните при необходимости: nano $CONFIG_FILE"
+    echo "  Создан $CONFIG_FILE"
+    echo "  Отредактируйте MQTT и PostgreSQL секции: nano $CONFIG_FILE"
 else
     echo "  $CONFIG_FILE уже существует"
 fi
 
-# Применяем SQL схему автоматически
+# Применяем SQL схему
 echo "  Применяю SQL схему..."
-if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$CONFIG_FILE" > /dev/null 2>&1; then
+if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" \
+        --config "$CONFIG_FILE" > /dev/null 2>&1; then
     echo "  Схема применена"
 else
     echo "  ⚠ Не удалось применить схему (проверьте $CONFIG_FILE и запустите вручную)"
-    echo "    cd $INSTALL_DIR && venv/bin/python scripts/setup_db.py --config $CONFIG_FILE"
+    echo "    cd $INSTALL_DIR && venv/bin/python scripts/setup_db.py --config config.yml"
 fi
 
 # --- 5) Системный пользователь и systemd ---
@@ -161,18 +175,13 @@ if ! id "$SERVICE_USER" &> /dev/null; then
 fi
 
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
-chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR"
-chmod 750 "$CONFIG_DIR"
 chmod 640 "$CONFIG_FILE" || true
 
 cp "$REPO_DIR/systemd/cg-db-writer.service" /etc/systemd/system/
-cp "$REPO_DIR/systemd/cg-db-writer-cleanup.service" /etc/systemd/system/
-cp "$REPO_DIR/systemd/cg-db-writer-cleanup.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable cg-db-writer
-echo "  Systemd unit-файлы установлены, автозапуск включён"
+echo "  Systemd unit установлен, автозапуск включён"
 
-# Запускаем / перезапускаем сервис
 systemctl restart cg-db-writer
 echo "  Сервис cg-db-writer запущен"
 
@@ -188,13 +197,13 @@ else
     echo "    Проверьте логи: sudo journalctl -u cg-db-writer -n 20"
 fi
 
-# Health check
-if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/check_health.py" --config "$CONFIG_FILE" > /tmp/cg-health-check.txt 2>&1; then
+if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/check_health.py" \
+        --config "$CONFIG_FILE" > /tmp/cg-health-check.txt 2>&1; then
     echo "  ✓ PostgreSQL: OK"
     echo "  ✓ MQTT: OK"
 else
     echo "  ⚠ Health check — есть проблемы:"
-    cat /tmp/cg-health-check.txt | grep -E 'ОШИБКА|OK' | sed 's/^/    /'
+    grep -E 'ОШИБКА|OK' /tmp/cg-health-check.txt | sed 's/^/    /' || true
 fi
 rm -f /tmp/cg-health-check.txt
 

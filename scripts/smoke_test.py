@@ -20,8 +20,8 @@ for addr, k in kpi.items():
     print(f"  addr={addr} heartbeat={k.heartbeat_sec}s tolerance={k.tolerance}")
 
 print("History defaults:", cfg.history_policy.defaults)
-print("Retention: gps_raw={0}h history={1}d events={2}d".format(
-    cfg.retention.gps_raw_hours, cfg.retention.history_raw_days, cfg.retention.events_days))
+print("Retention: gps_raw={0}d history_raw={1}d history_1min={2}d history_1hour={3}y".format(
+    cfg.retention.gps_raw_days, cfg.retention.history_raw_days, cfg.retention.history_1min_days, cfg.retention.history_1hour_years))
 
 # GPS filter test
 flt = GpsFilter(cfg.gps_filter)

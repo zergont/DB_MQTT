@@ -1,9 +1,0 @@
-[Unit]
-Description=CG DB-Writer — Retention cleanup timer
-
-[Timer]
-OnCalendar=daily
-Persistent=true
-
-[Install]
-WantedBy=timers.target
