@@ -24,7 +24,7 @@ postgres:
   port: 5432
   dbname: "cg_telemetry"
   user: "cg_writer"
-  password: "cg_writer"
+  password: "cg_dxrCthA1q0fR"
   pool_min: 2
   pool_max: 10
 
@@ -97,7 +97,7 @@ events_policy:
 # ---------- Retention (очистка) — tiered ------------------------------------
 retention:
   gps_raw_hours: 72
-  history_raw_days: 7         # raw data: 7 дней (было history_days: 30)
+  history_raw_days: 30        # raw data:30 дней (было history_days: 30)
   history_1min_days: 30       # 1-мин агрегаты: 30 дней
   history_1hour_days: 365     # 1-час агрегаты: 1 год
   events_days: 90
