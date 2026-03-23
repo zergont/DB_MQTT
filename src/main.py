@@ -18,7 +18,7 @@ import aiomqtt
 from src import db
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
-from src.handlers import dispatch, get_gps_filter, restore_write_timestamps
+from src.handlers import dispatch, get_gps_filter, restore_gap_tracker, restore_write_timestamps
 from src.health import HealthState, health_loop
 from src.log import setup_logging
 from src.version import get_version
@@ -247,6 +247,7 @@ async def _run(cfg: AppConfig) -> None:
     try:
         await _restore_gps_state(cfg)
         await restore_write_timestamps()
+        await restore_gap_tracker()
 
         tasks: list[asyncio.Task] = [
             asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded), name="mqtt_ingest"),

@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.0 — обработка входящих MQTT сообщений."""
+"""CG DB-Writer v2.0.1 — обработка входящих MQTT сообщений."""
 
 from __future__ import annotations
 
@@ -28,6 +28,17 @@ _last_write_ts: dict[tuple[str, str, int, int], datetime] = {}
 # Предупреждение при росте кэша (не критично, но стоит мониторить)
 _WRITE_TS_CACHE_WARN = 100_000
 
+# ── Gap detection ───────────────────────────────────────────────────────────
+# Трекер на уровне оборудования (router_sn, equip_type, panel_id).
+# Хранит время последнего полученного пакета (ДО сжатия/фильтрации).
+# Скользящее среднее интервала обновляется экспоненциально (EMA).
+
+_GAP_MULTIPLIER = 5  # elapsed > avg_interval × N → gap
+
+_last_packet_ts: dict[tuple[str, str, int], datetime] = {}
+_avg_interval: dict[tuple[str, str, int], float] = {}  # секунды (EMA)
+_EMA_ALPHA = 0.1  # сглаживание: 0.1 = медленная адаптация
+
 # Regex для разбора топиков
 _RE_TELEMETRY = re.compile(r"^cg/v1/telemetry/SN/([^/]+)$")
 _RE_DECODED   = re.compile(r"^cg/v1/decoded/SN/([^/]+)/pcc/(\d+)$")
@@ -37,6 +48,10 @@ def get_gps_filter(router_sn: str, cfg: AppConfig) -> GpsFilter:
     if router_sn not in _gps_filters:
         _gps_filters[router_sn] = GpsFilter(cfg.gps_filter)
     return _gps_filters[router_sn]
+
+
+# Трекер открытых gap'ов: (router_sn, equip_type, panel_id) → True если gap открыт
+_open_gaps: dict[tuple[str, str, int], bool] = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +82,31 @@ async def restore_write_timestamps() -> None:
         "Restored write timestamps: %d analog, %d state registers",
         analog_count,
         len(_last_write_ts) - analog_count,
+    )
+
+
+async def restore_gap_tracker() -> None:
+    """При старте загрузить состояние gap-трекера из БД.
+
+    1. last_seen_at из equipment → _last_packet_ts
+    2. Открытые gap'ы (gap_end IS NULL) → _open_gaps
+    """
+    async with db.pool().acquire() as conn:
+        # Восстанавливаем _last_packet_ts из equipment.last_seen_at
+        equip_rows = await db.get_last_packet_times(conn)
+        for r in equip_rows:
+            ekey = (r["router_sn"], r["equip_type"], r["panel_id"])
+            _last_packet_ts[ekey] = r["last_seen_at"]
+
+        # Восстанавливаем _open_gaps
+        gap_rows = await db.get_open_gaps(conn)
+        for r in gap_rows:
+            ekey = (r["router_sn"], r["equip_type"], r["panel_id"])
+            _open_gaps[ekey] = True
+
+    logger.info(
+        "Restored gap tracker: %d equipment timestamps, %d open gaps",
+        len(_last_packet_ts), len(_open_gaps),
     )
 
 
@@ -193,6 +233,75 @@ async def _handle_telemetry(
 # Decoded (панели)
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _check_equipment_gap(
+    conn: asyncpg.Connection,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    now: datetime,
+) -> None:
+    """Проверка gap'а на уровне оборудования (ДО сжатия/фильтрации).
+
+    Логика:
+    - Первый пакет: просто запоминаем ts, gap не детектируем.
+    - Последующие: обновляем EMA среднего интервала.
+      Если elapsed > avg_interval × _GAP_MULTIPLIER → gap.
+    - Если gap был открыт → закрываем (gap_end = now).
+    - Если gap обнаружен → открываем (gap_start = last_packet_ts).
+    """
+    ekey = (router_sn, equip_type, panel_id)
+    prev_ts = _last_packet_ts.get(ekey)
+
+    if prev_ts is not None:
+        elapsed = (now - prev_ts).total_seconds()
+        has_open_gap = _open_gaps.get(ekey, False)
+
+        # Вычисляем текущий avg (без обновления — обновим после решения о gap)
+        avg = _avg_interval.get(ekey)
+
+        if avg is None:
+            # Второй пакет — инициализируем EMA
+            _avg_interval[ekey] = elapsed
+            avg = elapsed
+            is_gap = False  # Ещё нет статистики для детекции
+        else:
+            # Gap detection: elapsed > avg × N
+            # Минимальный порог: 60 сек (чтобы не ловить мелкие задержки)
+            threshold = max(avg * _GAP_MULTIPLIER, 60.0)
+            is_gap = elapsed > threshold
+
+            # Обновляем EMA только нормальными интервалами (не gap'ами)
+            if not is_gap:
+                _avg_interval[ekey] = _EMA_ALPHA * elapsed + (1 - _EMA_ALPHA) * avg
+
+        if is_gap and not has_open_gap:
+            # Открываем gap: gap_start = время последнего пакета ДО разрыва
+            gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
+            logger.info(
+                "GAP opened id=%d %s/%s/%d: elapsed=%.0fs threshold=%.0fs avg=%.0fs",
+                gap_id, router_sn, equip_type, panel_id, elapsed, threshold, avg,
+            )
+            # Gap сразу закрывается текущим пакетом (он же — первый после разрыва)
+            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, now)
+            _open_gaps[ekey] = False
+            logger.info(
+                "GAP closed %s/%s/%d: %d gap(s) closed",
+                router_sn, equip_type, panel_id, count,
+            )
+
+        elif has_open_gap:
+            # Был открытый gap (восстановлен из БД при старте), данные пришли → закрываем
+            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, now)
+            _open_gaps[ekey] = False
+            logger.info(
+                "GAP closed (restored) %s/%s/%d: %d gap(s) closed, elapsed=%.0fs",
+                router_sn, equip_type, panel_id, count, elapsed,
+            )
+
+    # Обновляем время последнего пакета
+    _last_packet_ts[ekey] = now
+
+
 async def _handle_decoded(
     router_sn: str,
     panel_id: int,
@@ -237,6 +346,9 @@ async def _handle_decoded(
         async with conn.transaction():
             await db.upsert_object(conn, router_sn)
             await db.upsert_equipment(conn, router_sn, equip_type, panel_id)
+
+            # Gap detection — ДО обработки регистров (на уровне оборудования)
+            await _check_equipment_gap(conn, router_sn, equip_type, panel_id, now)
 
             prev_map    = await db.get_latest_state_rows_many(conn, router_sn, equip_type, panel_id, addrs)
             catalog_map = await db.get_register_catalog_rows_many(conn, equip_type, addrs)

@@ -366,7 +366,34 @@ CREATE INDEX IF NOT EXISTS idx_events_type_created
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 10. Share links (UI)
+-- 10. Data gaps — разрывы связи с оборудованием
+--
+--    Определяется в DB_MQTT при получении данных: если время с последнего
+--    пакета > avg_interval × N (N=5), фиксируется gap.
+--    gap_end = NULL означает: оборудование сейчас offline (gap продолжается).
+--    При получении новых данных gap закрывается (gap_end = ts нового пакета).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS data_gaps (
+    id          BIGSERIAL   PRIMARY KEY,
+    router_sn   TEXT        NOT NULL,
+    equip_type  TEXT        NOT NULL,
+    panel_id    INT         NOT NULL,
+    gap_start   TIMESTAMPTZ NOT NULL,   -- последний пакет ДО разрыва
+    gap_end     TIMESTAMPTZ,            -- первый пакет ПОСЛЕ разрыва (NULL = ongoing)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_gaps_equip_time
+    ON data_gaps (router_sn, equip_type, panel_id, gap_start DESC);
+
+CREATE INDEX IF NOT EXISTS idx_data_gaps_open
+    ON data_gaps (router_sn, equip_type, panel_id)
+    WHERE gap_end IS NULL;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 11. Share links (UI)
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS share_links (
@@ -400,7 +427,7 @@ BEGIN
         GRANT UPDATE (name) ON equipment TO cg_ui;
         GRANT DELETE ON objects, equipment, latest_state,
                         history, state_events, events,
-                        gps_latest_filtered TO cg_ui;
+                        gps_latest_filtered, data_gaps TO cg_ui;
     END IF;
 END
 $$;
@@ -413,10 +440,11 @@ BEGIN
             ON objects, equipment, register_catalog,
                gps_raw_history, gps_latest_filtered,
                latest_state, history,
-               state_events, parameter_history, events
+               state_events, parameter_history, events, data_gaps
             TO cg_writer;
         GRANT USAGE ON SEQUENCE
-            state_events_id_seq, parameter_history_id_seq, events_id_seq
+            state_events_id_seq, parameter_history_id_seq, events_id_seq,
+            data_gaps_id_seq
             TO cg_writer;
     END IF;
 END

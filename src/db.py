@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.0 — слой работы с PostgreSQL/TimescaleDB (asyncpg)."""
+"""CG DB-Writer v2.0.1 — слой работы с PostgreSQL/TimescaleDB (asyncpg)."""
 
 from __future__ import annotations
 
@@ -309,3 +309,65 @@ async def get_register_catalog_rows_many(
         equip_type, addrs,
     )
     return {int(r["addr"]): r for r in rows}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data gaps — разрывы связи с оборудованием
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def insert_data_gap(
+    conn: asyncpg.Connection,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    gap_start: datetime,
+) -> int:
+    """Открыть новый gap (gap_end = NULL → ongoing). Возвращает id."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO data_gaps (router_sn, equip_type, panel_id, gap_start)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        """,
+        router_sn, equip_type, panel_id, gap_start,
+    )
+    return row["id"]
+
+
+async def close_data_gap(
+    conn: asyncpg.Connection,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    gap_end: datetime,
+) -> int:
+    """Закрыть открытый gap (gap_end IS NULL). Возвращает кол-во обновлённых."""
+    result = await conn.execute(
+        """
+        UPDATE data_gaps
+        SET gap_end = $4
+        WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+          AND gap_end IS NULL
+        """,
+        router_sn, equip_type, panel_id, gap_end,
+    )
+    # asyncpg returns "UPDATE N"
+    return int(result.split()[-1])
+
+
+async def get_open_gaps(conn: asyncpg.Connection) -> list[asyncpg.Record]:
+    """Все незакрытые gap'ы (для восстановления при старте)."""
+    return await conn.fetch(
+        """
+        SELECT router_sn, equip_type, panel_id, gap_start
+        FROM data_gaps
+        WHERE gap_end IS NULL
+        """
+    )
+
+
+async def get_last_packet_times(conn: asyncpg.Connection) -> list[asyncpg.Record]:
+    """Последнее время пакета для каждого оборудования (equipment.last_seen_at)."""
+    return await conn.fetch(
+        "SELECT router_sn, equip_type, panel_id, last_seen_at FROM equipment"
+    )
