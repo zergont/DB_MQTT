@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.1 — слой работы с PostgreSQL/TimescaleDB (asyncpg)."""
+"""CG DB-Writer v2.1.0 — слой работы с PostgreSQL/TimescaleDB (asyncpg)."""
 
 from __future__ import annotations
 

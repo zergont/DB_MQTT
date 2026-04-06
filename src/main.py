@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.0 — главная точка входа.
+"""CG DB-Writer v2.1.0 — главная точка входа.
 
 Использование:
   python -m src.main --config config.yml
@@ -9,9 +9,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiomqtt
 
@@ -236,7 +239,7 @@ async def _worker_loop(
                 q_decoded.task_done()
 
 
-async def _run(cfg: AppConfig) -> None:
+async def _run(cfg: AppConfig, config_path: Path) -> None:
     """Запускает все подсистемы."""
     await db.init_pool(cfg.postgres)
 
@@ -255,7 +258,17 @@ async def _run(cfg: AppConfig) -> None:
         ]
 
         if cfg.health.enabled:
-            tasks.append(asyncio.create_task(health_loop(cfg.health, health_state), name="health_loop"))
+            extra_setup = None
+            if cfg.web_ui.enabled:
+                from src.web.routes import setup_routes
+
+                def extra_setup(app, *, _cp=config_path):
+                    setup_routes(app, _cp)
+
+            tasks.append(asyncio.create_task(
+                health_loop(cfg.health, health_state, extra_setup=extra_setup),
+                name="health_loop",
+            ))
 
         for i in range(max(1, cfg.ingest.worker_count)):
             tasks.append(asyncio.create_task(
@@ -290,7 +303,7 @@ def _shutdown(loop: asyncio.AbstractEventLoop) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CG DB-Writer v2.0.0")
+    parser = argparse.ArgumentParser(description="CG DB-Writer v2.1.0")
     parser.add_argument(
         "-c", "--config",
         default="config.yml",
@@ -298,7 +311,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    config_path = Path(args.config).resolve()
+    cfg = load_config(config_path)
     setup_logging(cfg.logging)
     logger.info("Starting CG DB-Writer version %s", get_version())
 
@@ -310,7 +324,7 @@ def main() -> None:
             pass   # Windows
 
     try:
-        loop.run_until_complete(_run(cfg))
+        loop.run_until_complete(_run(cfg, config_path))
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down…")
     finally:

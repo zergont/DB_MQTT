@@ -24,7 +24,7 @@ postgres:
   port: 5432
   dbname: "cg_telemetry"
   user: "cg_writer"
-  password: "cg_dxrCthA1q0fR"
+  password: ""    # заполнить
   pool_min: 2
   pool_max: 10
 
@@ -115,3 +115,10 @@ logging:
   level: "INFO"     # DEBUG | INFO | WARNING | ERROR
   log_file: ""      # пусто = только stdout
   json_logs: false
+
+# ---------- Web UI -----------------------------------------------------------
+web_ui:
+  enabled: true     # Веб-интерфейс конфигурации (на том же порту что health)
+
+# ---------- Версия конфигурации (автоинкремент) ------------------------------
+config_version: 0

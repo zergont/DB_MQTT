@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CG DB-Writer — Конфигурация</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────── -->
+
+<div class="header">
+  <h1>CG DB-Writer</h1>
+  <div class="header-meta">
+    <span id="app-version">v...</span>
+    <span id="health-status" class="badge badge-idle">...</span>
+    <span id="config-version" class="badge badge-version">конфиг v0</span>
+  </div>
+</div>
+
+<!-- ── Container ──────────────────────────────────────────────── -->
+
+<div class="container">
+
+  <!-- Баннер "требуется перезапуск" -->
+  <div id="restart-banner" class="banner banner-warning">
+    Конфигурация сохранена. Для применения изменений необходим перезапуск сервиса.
+    <button class="btn btn-danger btn-sm" style="margin-left: 12px;" id="btn-restart-banner"
+            onclick="document.getElementById('btn-restart').click()">
+      Перезапустить
+    </button>
+  </div>
+
+  <!-- Кнопки действий -->
+  <div class="action-bar">
+    <button id="btn-save" class="btn btn-primary" disabled>Сохранить</button>
+    <button id="btn-restart" class="btn btn-danger">Перезапустить сервис</button>
+    <button id="btn-download" class="btn btn-outline">Скачать конфиг</button>
+    <button id="btn-upload" class="btn btn-outline">Восстановить из файла</button>
+  </div>
+
+  <!-- ── MQTT ───────────────────────────────────────────────── -->
+
+  <div class="section">
+    <div class="section-header">
+      <h2>MQTT</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-mqtt"></div>
+  </div>
+
+  <!-- ── PostgreSQL ─────────────────────────────────────────── -->
+
+  <div class="section">
+    <div class="section-header">
+      <h2>PostgreSQL</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-postgres"></div>
+  </div>
+
+  <!-- ── Ingest ─────────────────────────────────────────────── -->
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Приём данных (Ingest)</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-ingest"></div>
+  </div>
+
+  <!-- ── GPS Filter ─────────────────────────────────────────── -->
+
+  <div class="section">
+    <div class="section-header">
+      <h2>GPS фильтр (анти-телепорт)</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-gps_filter"></div>
+  </div>
+
+  <!-- ── History Policy: Defaults ───────────────────────────── -->
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Политика записи истории (defaults)</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-history_defaults"></div>
+  </div>
+
+  <!-- ── History Policy: KPI ────────────────────────────────── -->
+
+  <div class="section">
+    <div class="section-header">
+      <h2>KPI регистры</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-kpi"></div>
+  </div>
+
+  <!-- ── Events Policy ──────────────────────────────────────── -->
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Политика событий</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-events_policy"></div>
+  </div>
+
+  <!-- ── Retention ──────────────────────────────────────────── -->
+
+  <div class="section collapsed">
+    <div class="section-header">
+      <h2>Retention (информационно)</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-retention"></div>
+  </div>
+
+  <!-- ── Logging ────────────────────────────────────────────── -->
+
+  <div class="section collapsed">
+    <div class="section-header">
+      <h2>Логирование</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-logging"></div>
+  </div>
+
+  <!-- ── Health ─────────────────────────────────────────────── -->
+
+  <div class="section collapsed">
+    <div class="section-header">
+      <h2>Health endpoint</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-health"></div>
+  </div>
+
+  <!-- ── Web UI ─────────────────────────────────────────────── -->
+
+  <div class="section collapsed">
+    <div class="section-header">
+      <h2>Веб-интерфейс</h2>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="section-body" id="body-web_ui"></div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

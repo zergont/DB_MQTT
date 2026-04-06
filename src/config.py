@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.0 — загрузка и валидация конфигурации из YAML."""
+"""CG DB-Writer v2.1.0 — загрузка и валидация конфигурации из YAML."""
 
 from __future__ import annotations
 
@@ -139,6 +139,11 @@ class HealthCfg:
 
 
 @dataclass
+class WebUiCfg:
+    enabled: bool = True
+
+
+@dataclass
 class AppConfig:
     mqtt:           MqttCfg          = field(default_factory=MqttCfg)
     postgres:       PostgresCfg      = field(default_factory=PostgresCfg)
@@ -149,6 +154,7 @@ class AppConfig:
     retention:      RetentionCfg     = field(default_factory=RetentionCfg)
     logging:        LoggingCfg       = field(default_factory=LoggingCfg)
     health:         HealthCfg        = field(default_factory=HealthCfg)
+    web_ui:         WebUiCfg         = field(default_factory=WebUiCfg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -184,6 +190,40 @@ def _parse_history(raw: dict[str, Any] | None) -> HistoryPolicyCfg:
     return HistoryPolicyCfg(defaults=defaults, kpi_registers=kpis)
 
 
+def parse_config_dict(raw: dict[str, Any]) -> AppConfig:
+    """Собрать AppConfig из сырого dict (результат yaml.safe_load).
+
+    Используется и при загрузке файла, и для валидации из веб-интерфейса.
+    """
+    return AppConfig(
+        mqtt=_parse_mqtt(raw.get("mqtt")),
+        postgres=_merge(PostgresCfg, raw.get("postgres")),
+        ingest=_merge(IngestCfg, raw.get("ingest")),
+        gps_filter=_merge(GpsFilterCfg, raw.get("gps_filter")),
+        history_policy=_parse_history(raw.get("history_policy")),
+        events_policy=_merge(EventsPolicyCfg, raw.get("events_policy")),
+        retention=_merge(RetentionCfg, raw.get("retention")),
+        logging=_merge(LoggingCfg, raw.get("logging")),
+        health=_merge(HealthCfg, raw.get("health")),
+        web_ui=_merge(WebUiCfg, raw.get("web_ui")),
+    )
+
+
+def config_to_dict(cfg: AppConfig) -> dict[str, Any]:
+    """Конвертировать AppConfig обратно в dict для yaml.dump().
+
+    MQTT subscriptions упаковываются обратно в nested-структуру.
+    """
+    d = dataclasses.asdict(cfg)
+    # MQTT: вернуть subscriptions в вложенную структуру
+    mqtt = d.get("mqtt", {})
+    mqtt["subscriptions"] = {
+        "decoded": mqtt.pop("sub_decoded", ""),
+        "telemetry": mqtt.pop("sub_telemetry", ""),
+    }
+    return d
+
+
 def load_config(path: str | Path) -> AppConfig:
     """Загрузить конфигурацию из YAML файла."""
     p = Path(path)
@@ -194,16 +234,6 @@ def load_config(path: str | Path) -> AppConfig:
     with p.open("r", encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
 
-    cfg = AppConfig(
-        mqtt=_parse_mqtt(raw.get("mqtt")),
-        postgres=_merge(PostgresCfg, raw.get("postgres")),
-        ingest=_merge(IngestCfg, raw.get("ingest")),
-        gps_filter=_merge(GpsFilterCfg, raw.get("gps_filter")),
-        history_policy=_parse_history(raw.get("history_policy")),
-        events_policy=_merge(EventsPolicyCfg, raw.get("events_policy")),
-        retention=_merge(RetentionCfg, raw.get("retention")),
-        logging=_merge(LoggingCfg, raw.get("logging")),
-        health=_merge(HealthCfg, raw.get("health")),
-    )
+    cfg = parse_config_dict(raw)
     logger.info("Config loaded from %s", p)
     return cfg

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CG DB-Writer v2.0.0 — проверка здоровья системы.
+"""CG DB-Writer v2.1.0 — проверка здоровья системы.
 
 Использование:
   python scripts/check_health.py --config config.yml
@@ -188,7 +188,7 @@ async def main_async(config_path: str) -> None:
     print(f"  MQTT:                   {'OK' if mqtt_ok else 'ОШИБКА'}")
 
     if pg_ok and mqtt_ok:
-        print("\n  Всё в порядке! DB-Writer v2.0.0 готов к работе.")
+        print("\n  Всё в порядке! DB-Writer v2.1.0 готов к работе.")
         return
 
     print("\n  Есть проблемы. Исправьте ошибки выше.")
@@ -196,7 +196,7 @@ async def main_async(config_path: str) -> None:
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="CG DB-Writer v2.0.0 health check")
+    p = argparse.ArgumentParser(description="CG DB-Writer v2.1.0 health check")
     p.add_argument("-c", "--config", default="config.yml")
     args = p.parse_args()
     asyncio.run(main_async(args.config))

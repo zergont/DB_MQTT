@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -73,10 +74,17 @@ async def _handle_health(request: web.Request) -> web.Response:
     return web.json_response(_payload(state))
 
 
-async def health_loop(cfg: HealthCfg, state: HealthState) -> None:
-    app = web.Application()
+async def health_loop(
+    cfg: HealthCfg,
+    state: HealthState,
+    extra_setup: Callable[[web.Application], None] | None = None,
+) -> None:
+    app = web.Application(client_max_size=4 * 1024 * 1024)  # 4 MB для загрузки конфига
     app["state"] = state
     app.router.add_get("/health", _handle_health)
+
+    if extra_setup is not None:
+        extra_setup(app)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()

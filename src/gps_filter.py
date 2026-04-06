@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.0 — GPS anti-teleport фильтр."""
+"""CG DB-Writer v2.1.0 — GPS anti-teleport фильтр."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.0 — логика решения «писать ли в history / state_events»."""
+"""CG DB-Writer v2.1.0 — логика решения «писать ли в history / state_events»."""
 
 from __future__ import annotations
 

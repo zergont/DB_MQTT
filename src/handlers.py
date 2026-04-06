@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.0.1 — обработка входящих MQTT сообщений."""
+"""CG DB-Writer v2.1.0 — обработка входящих MQTT сообщений."""
 
 from __future__ import annotations
 
