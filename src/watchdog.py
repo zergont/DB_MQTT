@@ -17,13 +17,13 @@ logger = logging.getLogger("cg.watchdog")
 # Состояние конечного автомата per-entity
 # Возможные состояния: "online", "stale", "offline"
 _router_state: dict[str, str] = {}
-_panel_state: dict[tuple[str, int], str] = {}
+_panel_state: dict[tuple[str, str, int], str] = {}
 
 
 async def watchdog_loop(
     cfg: AppConfig,
     last_seen: dict[str, datetime],
-    panel_last_seen: dict[tuple[str, int], datetime],
+    panel_last_seen: dict[tuple[str, str, int], datetime],
 ) -> None:
     """Бесконечный цикл проверки stale/offline."""
     interval = cfg.events_policy.check_interval_sec
@@ -40,7 +40,7 @@ async def watchdog_loop(
 async def _check(
     cfg: AppConfig,
     last_seen: dict[str, datetime],
-    panel_last_seen: dict[tuple[str, int], datetime],
+    panel_last_seen: dict[tuple[str, str, int], datetime],
 ) -> None:
     now = datetime.now(timezone.utc)
     ep = cfg.events_policy
@@ -62,9 +62,9 @@ async def _check(
             _router_state[router_sn] = new_state
 
     # --- Panels ---
-    for (router_sn, panel_id), ts in list(panel_last_seen.items()):
+    for (router_sn, equip_type, panel_id), ts in list(panel_last_seen.items()):
         age = (now - ts).total_seconds()
-        prev = _panel_state.get((router_sn, panel_id), "online")
+        prev = _panel_state.get((router_sn, equip_type, panel_id), "online")
 
         if age >= ep.panel_offline_sec:
             new_state = "offline"
@@ -74,8 +74,8 @@ async def _check(
             new_state = "online"
 
         if new_state != prev:
-            await _emit_panel_event(router_sn, panel_id, prev, new_state)
-            _panel_state[(router_sn, panel_id)] = new_state
+            await _emit_panel_event(router_sn, equip_type, panel_id, prev, new_state)
+            _panel_state[(router_sn, equip_type, panel_id)] = new_state
 
 
 async def _emit_router_event(router_sn: str, prev: str, new: str) -> None:
@@ -96,7 +96,7 @@ async def _emit_router_event(router_sn: str, prev: str, new: str) -> None:
 
 
 async def _emit_panel_event(
-    router_sn: str, panel_id: int, prev: str, new: str,
+    router_sn: str, equip_type: str, panel_id: int, prev: str, new: str,
 ) -> None:
     if new == "offline":
         event_type = "panel_offline"
@@ -105,12 +105,12 @@ async def _emit_panel_event(
     else:
         return
 
-    logger.info("Panel %s/pcc/%d: %s → %s", router_sn, panel_id, prev, new)
+    logger.info("Panel %s/%s/%d: %s → %s", router_sn, equip_type, panel_id, prev, new)
     async with db.pool().acquire() as conn:
         await db.insert_event(
             conn, router_sn,
             event_type,
-            description=f"panel_id={panel_id} {prev} → {new}",
-            equip_type="pcc",
+            description=f"{equip_type}/{panel_id} {prev} → {new}",
+            equip_type=equip_type,
             panel_id=panel_id,
         )

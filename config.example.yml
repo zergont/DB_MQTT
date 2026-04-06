@@ -15,7 +15,7 @@ mqtt:
   reconnect_min_delay: 1
   reconnect_max_delay: 60
   subscriptions:
-    decoded:   "cg/v1/decoded/SN/+/pcc/+"
+    decoded:   "cg/v1/decoded/SN/+/+/+"
     telemetry: "cg/v1/telemetry/SN/+"
 
 # ---------- PostgreSQL (asyncpg) ---------------------------------------------

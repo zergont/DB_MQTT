@@ -31,7 +31,7 @@ logger = logging.getLogger("cg.main")
 
 # Shared state для watchdog
 _last_seen: dict[str, datetime] = {}
-_panel_last_seen: dict[tuple[str, int], datetime] = {}
+_panel_last_seen: dict[tuple[str, str, int], datetime] = {}
 
 
 @dataclass(slots=True)
@@ -54,13 +54,14 @@ def _touch_last_seen(topic: str) -> None:
         _last_seen[parts[4]] = now
         return
 
-    # decoded: cg/v1/decoded/SN/<sn>/pcc/<panel_id>
-    if len(parts) == 7 and parts[0] == "cg" and parts[2] == "decoded" and parts[3] == "SN" and parts[5] == "pcc":
+    # decoded: cg/v1/decoded/SN/<sn>/<equip_type>/<panel_id>
+    if len(parts) == 7 and parts[0] == "cg" and parts[2] == "decoded" and parts[3] == "SN":
         sn = parts[4]
+        equip_type = parts[5]
         _last_seen[sn] = now
         try:
             panel_id = int(parts[6])
-            _panel_last_seen[(sn, panel_id)] = now
+            _panel_last_seen[(sn, equip_type, panel_id)] = now
         except ValueError:
             pass
 

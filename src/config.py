@@ -30,7 +30,7 @@ class MqttCfg:
     reconnect_min_delay: int = 1
     reconnect_max_delay: int = 60
 
-    sub_decoded:   str = "cg/v1/decoded/SN/+/pcc/+"
+    sub_decoded:   str = "cg/v1/decoded/SN/+/+/+"
     sub_telemetry: str = "cg/v1/telemetry/SN/+"
 
 
