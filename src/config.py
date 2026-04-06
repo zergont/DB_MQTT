@@ -135,7 +135,7 @@ class LoggingCfg:
 class HealthCfg:
     enabled: bool = True
     port: int = 8765
-    bind: str = "127.0.0.1"
+    bind: str = "0.0.0.0"
 
 
 @dataclass
