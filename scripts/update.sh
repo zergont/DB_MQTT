@@ -63,15 +63,19 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "[1/6] Копирование файлов..."
 mkdir -p "$INSTALL_DIR"
-rm -rf "$INSTALL_DIR/src" "$INSTALL_DIR/schema" "$INSTALL_DIR/scripts"
-cp -r "$REPO_DIR/src" "$INSTALL_DIR/"
-cp -r "$REPO_DIR/schema" "$INSTALL_DIR/"
-cp -r "$REPO_DIR/scripts" "$INSTALL_DIR/"
-cp "$REPO_DIR/requirements.txt" "$INSTALL_DIR/"
-cp "$REPO_DIR/config.example.yml" "$INSTALL_DIR/"
-cp "$REPO_DIR/VERSION" "$INSTALL_DIR/"
-cp "$REPO_DIR/CHANGELOG.md" "$INSTALL_DIR/"
-echo "  Файлы обновлены"
+if [ "$REPO_DIR" != "$INSTALL_DIR" ]; then
+    rm -rf "$INSTALL_DIR/src" "$INSTALL_DIR/schema" "$INSTALL_DIR/scripts"
+    cp -r "$REPO_DIR/src" "$INSTALL_DIR/"
+    cp -r "$REPO_DIR/schema" "$INSTALL_DIR/"
+    cp -r "$REPO_DIR/scripts" "$INSTALL_DIR/"
+    cp "$REPO_DIR/requirements.txt" "$INSTALL_DIR/"
+    cp "$REPO_DIR/config.example.yml" "$INSTALL_DIR/"
+    cp "$REPO_DIR/VERSION" "$INSTALL_DIR/"
+    cp "$REPO_DIR/CHANGELOG.md" "$INSTALL_DIR/"
+    echo "  Файлы обновлены"
+else
+    echo "  REPO_DIR == INSTALL_DIR — копирование не требуется (репозиторий уже в $INSTALL_DIR)"
+fi
 
 echo ""
 echo "[2/6] Обновление зависимостей..."
