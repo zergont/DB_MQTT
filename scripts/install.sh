@@ -155,14 +155,14 @@ else
     echo "  $CONFIG_FILE уже существует"
 fi
 
-# Применяем SQL схему
+# Применяем SQL схему напрямую через psql (нужны права суперпользователя
+# для TimescaleDB Continuous Aggregates и Retention/Compression policies)
 echo "  Применяю SQL схему..."
-if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" \
-        --config "$CONFIG_FILE" > /dev/null 2>&1; then
+if sudo -u postgres psql -d "$PG_DB" -f "$INSTALL_DIR/schema/schema.sql" > /dev/null 2>&1; then
     echo "  Схема применена"
 else
-    echo "  ⚠ Не удалось применить схему (проверьте $CONFIG_FILE и запустите вручную)"
-    echo "    cd $INSTALL_DIR && venv/bin/python scripts/setup_db.py --config config.yml"
+    echo "  ⚠ Не удалось применить схему. Запустите вручную:"
+    echo "    sudo -u postgres psql -d $PG_DB -f $INSTALL_DIR/schema/schema.sql"
 fi
 
 # --- 5) Системный пользователь и systemd ---

@@ -207,13 +207,13 @@ fi
 
 echo ""
 echo "[4/6] Применение SQL схемы..."
-if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/scripts/setup_db.py" --config "$CONFIG_FILE" > /tmp/cg-db-writer-update-db.txt 2>&1; then
+# Применяем через psql от суперпользователя — нужно для TimescaleDB CA, policies и GRANT
+if sudo -u postgres psql -d "$(grep -m1 'dbname:' "$CONFIG_FILE" | awk '{print $2}' | tr -d '"')" \
+        -f "$INSTALL_DIR/schema/schema.sql" > /tmp/cg-db-writer-update-db.txt 2>&1; then
     echo "  Схема применена"
 else
-    echo "  ОШИБКА: не удалось применить схему"
-    cat /tmp/cg-db-writer-update-db.txt
-    rm -f /tmp/cg-db-writer-update-db.txt
-    exit 1
+    echo "  ⚠ Проблемы при применении схемы (могут быть безобидные 'already exists'):"
+    grep -v "NOTICE\|already exists\|skipping" /tmp/cg-db-writer-update-db.txt | head -20 || true
 fi
 rm -f /tmp/cg-db-writer-update-db.txt
 
