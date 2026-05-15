@@ -30,6 +30,7 @@ EXPECTED_TABLES = [
     "state_events",
     "parameter_history",
     "events",
+    "fault_history",
 ]
 
 EXPECTED_VIEWS = [

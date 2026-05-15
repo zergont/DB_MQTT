@@ -202,6 +202,7 @@ const FIELDS_EVENTS = [
   ["check_interval_sec","Интервал проверки (сек)",         "number"],
   ["enable_gps_reject_events",        "События GPS reject",       "bool"],
   ["enable_unknown_register_events",  "События неизвестных рег.", "bool"],
+  ["enable_fault_events",             "События shutdown fault",   "bool"],
 ];
 
 const FIELDS_RETENTION = [

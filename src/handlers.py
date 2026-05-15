@@ -53,6 +53,9 @@ def get_gps_filter(router_sn: str, cfg: AppConfig) -> GpsFilter:
 # Трекер открытых gap'ов: (router_sn, equip_type, panel_id) → True если gap открыт
 _open_gaps: dict[tuple[str, str, int], bool] = {}
 
+# Кэш активных fault-битов: (router_sn, equip_type, panel_id, addr) → set of bit numbers
+_active_fault_bits: dict[tuple[str, str, int, int], set[int]] = {}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup restore
@@ -83,6 +86,19 @@ async def restore_write_timestamps() -> None:
         analog_count,
         len(_last_write_ts) - analog_count,
     )
+
+
+async def restore_fault_bits() -> None:
+    """При старте загрузить активные fault-биты из fault_history WHERE fault_end IS NULL."""
+    async with db.pool().acquire() as conn:
+        rows = await db.get_open_fault_bits(conn)
+        for r in rows:
+            key = (r["router_sn"], r["equip_type"], r["panel_id"], r["addr"])
+            if key not in _active_fault_bits:
+                _active_fault_bits[key] = set()
+            _active_fault_bits[key].add(r["bit"])
+    logger.info("Restored fault bits: %d active faults across %d registers",
+                sum(len(v) for v in _active_fault_bits.values()), len(_active_fault_bits))
 
 
 async def restore_gap_tracker() -> None:
@@ -342,6 +358,8 @@ async def _handle_decoded(
     state_batch:     list[tuple] = []        # дискретные / enum
     parameter_batch: list[tuple] = []        # уставки
     event_rows:      list[tuple] = []        # события
+    fault_open_batch:  list[tuple] = []      # новые fault-биты
+    fault_close_batch: list[tuple] = []      # закрытые fault-биты
 
     async with db.pool().acquire() as conn:
         async with conn.transaction():
@@ -355,6 +373,23 @@ async def _handle_decoded(
             catalog_map = await db.get_register_catalog_rows_many(conn, equip_type, addrs)
 
             for reg in registers:
+                # Fault bitmap — специальная обработка вне стандартного роутинга
+                value = reg.get("value")
+                if reg.get("unit") == "fault_bitmap" and isinstance(value, dict):
+                    addr = _safe_int(reg.get("addr"))
+                    if addr is not None:
+                        _process_fault_bitmap(
+                            router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
+                            addr=addr, raw_val=_safe_int(reg.get("raw")),
+                            value_dict=value, ts=ts, now=now,
+                            latest_rows_map=latest_rows_map,
+                            fault_open_batch=fault_open_batch,
+                            fault_close_batch=fault_close_batch,
+                            event_rows=event_rows,
+                            cfg=cfg,
+                        )
+                    continue
+
                 _process_register(
                     cfg=cfg, kpi_map=kpi_map,
                     router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
@@ -375,6 +410,10 @@ async def _handle_decoded(
                 await db.insert_state_event_batch(conn, state_batch)
             if parameter_batch:
                 await db.insert_parameter_history_batch(conn, parameter_batch)
+            if fault_open_batch:
+                await db.open_fault_batch(conn, fault_open_batch)
+            if fault_close_batch:
+                await db.close_faults_batch(conn, fault_close_batch)
             if event_rows:
                 await db.insert_event_batch(conn, event_rows)
 
@@ -383,6 +422,92 @@ async def _handle_decoded(
         router_sn, equip_type, panel_id, len(registers),
         len(latest_rows_map), len(history_batch),
         len(state_batch), len(parameter_batch), len(event_rows),
+    )
+
+
+def _process_fault_bitmap(
+    *,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    addr: int,
+    raw_val: int | None,
+    value_dict: dict[str, Any],
+    ts: datetime,
+    now: datetime,
+    latest_rows_map: dict[int, tuple],
+    fault_open_batch: list[tuple],
+    fault_close_batch: list[tuple],
+    event_rows: list[tuple],
+    cfg: AppConfig,
+) -> None:
+    """Обработка регистра с unit='fault_bitmap'.
+
+    - Сравниваем текущие активные биты с кэшем.
+    - Новые биты → fault_open_batch (+ event при severity='shutdown').
+    - Исчезнувшие биты → fault_close_batch.
+    - latest_state: value=bitmask (raw), text=JSON активных fault'ов.
+    """
+    # Текущие активные биты из сообщения: bit → {name, severity}
+    faults_list: list[dict] = value_dict.get("faults") or []
+    current: dict[int, dict] = {f["bit"]: f for f in faults_list if "bit" in f}
+    current_bits: set[int] = set(current.keys())
+
+    fkey = (router_sn, equip_type, panel_id, addr)
+    prev_bits: set[int] = _active_fault_bits.get(fkey, set())
+
+    appeared = current_bits - prev_bits
+    cleared  = prev_bits - current_bits
+
+    # Открываем новые fault'ы
+    for bit in appeared:
+        info = current[bit]
+        fault_name = info.get("name")
+        severity   = info.get("severity")
+        fault_open_batch.append((
+            router_sn, equip_type, panel_id, addr, bit,
+            fault_name, severity, ts,
+        ))
+        # Shutdown → дополнительно в events
+        if severity == "shutdown" and cfg.events_policy.enable_fault_events:
+            payload_json = json.dumps(
+                {"addr": addr, "bit": bit, "fault_name": fault_name, "severity": severity},
+                ensure_ascii=False,
+            )
+            event_rows.append((
+                router_sn, equip_type, panel_id,
+                "fault_shutdown",
+                f"addr={addr} bit={bit} {fault_name}",
+                payload_json,
+            ))
+        logger.info(
+            "FAULT appeared %s/%s/%d addr=%d bit=%d severity=%s name=%s",
+            router_sn, equip_type, panel_id, addr, bit, severity, fault_name,
+        )
+
+    # Закрываем исчезнувшие fault'ы
+    for bit in cleared:
+        fault_close_batch.append((router_sn, equip_type, panel_id, addr, bit, ts))
+        logger.info(
+            "FAULT cleared %s/%s/%d addr=%d bit=%d",
+            router_sn, equip_type, panel_id, addr, bit,
+        )
+
+    # Обновляем кэш
+    _active_fault_bits[fkey] = current_bits
+
+    # latest_state: value = битовая маска, text = JSON активных fault'ов
+    text_val: str | None = None
+    if faults_list:
+        text_val = json.dumps(
+            [{"bit": f.get("bit"), "name": f.get("name"), "severity": f.get("severity")}
+             for f in faults_list],
+            ensure_ascii=False,
+        )
+    dec_value = Decimal(str(raw_val)) if raw_val is not None else None
+    latest_rows_map[addr] = (
+        router_sn, equip_type, panel_id, addr,
+        ts, dec_value, raw_val, text_val, "fault_bitmap", None, None,
     )
 
 

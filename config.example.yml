@@ -93,6 +93,7 @@ events_policy:
   check_interval_sec: 30
   enable_gps_reject_events: true
   enable_unknown_register_events: true
+  enable_fault_events: true         # shutdown fault → дополнительно в events
 
 # ---------- Retention (очистка) — только информационно ----------------------
 # TimescaleDB Retention Policies устанавливаются в schema.sql через setup_db.py.

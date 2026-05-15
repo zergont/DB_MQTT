@@ -371,3 +371,54 @@ async def get_last_packet_times(conn: asyncpg.Connection) -> list[asyncpg.Record
     return await conn.fetch(
         "SELECT router_sn, equip_type, panel_id, last_seen_at FROM equipment"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fault history — история активности fault-битов
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def open_fault_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+    """Открыть новые fault-записи (fault_end = NULL).
+
+    Tuple: (router_sn, equip_type, panel_id, addr, bit, fault_name, severity, fault_start)
+    """
+    if not rows:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO fault_history
+          (router_sn, equip_type, panel_id, addr, bit, fault_name, severity, fault_start)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        """,
+        rows,
+    )
+
+
+async def close_faults_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+    """Закрыть активные fault-записи (fault_end IS NULL → fault_end = ts).
+
+    Tuple: (router_sn, equip_type, panel_id, addr, bit, fault_end)
+    """
+    if not rows:
+        return
+    await conn.executemany(
+        """
+        UPDATE fault_history
+        SET fault_end = $6
+        WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+          AND addr = $4 AND bit = $5
+          AND fault_end IS NULL
+        """,
+        rows,
+    )
+
+
+async def get_open_fault_bits(conn: asyncpg.Connection) -> list[asyncpg.Record]:
+    """Все активные fault-биты (для восстановления при старте)."""
+    return await conn.fetch(
+        """
+        SELECT router_sn, equip_type, panel_id, addr, bit
+        FROM fault_history
+        WHERE fault_end IS NULL
+        """
+    )

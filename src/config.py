@@ -108,6 +108,7 @@ class EventsPolicyCfg:
 
     enable_gps_reject_events: bool = True
     enable_unknown_register_events: bool = True
+    enable_fault_events: bool = True      # shutdown fault → дополнительно в events
 
 
 @dataclass
