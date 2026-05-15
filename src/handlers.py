@@ -463,9 +463,12 @@ def _process_fault_bitmap(
 
     # Типы событий по severity
     _SEVERITY_EVENT_TYPE = {
-        "shutdown": "fault_shutdown",
-        "warning":  "fault_warning",
-        "unknown":  "fault_unknown",
+        "shutdown":          "fault_shutdown",
+        "shutdown_cooldown": "fault_shutdown_cooldown",
+        "warning":           "fault_warning",
+        "derate":            "fault_derate",
+        "none":              "fault_none",
+        "unknown":           "fault_unknown",
     }
 
     # Открываем новые fault'ы

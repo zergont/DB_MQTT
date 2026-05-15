@@ -398,7 +398,7 @@ CREATE INDEX IF NOT EXISTS idx_data_gaps_open
 --    Каждая строка = один fault-бит за период его активности.
 --    fault_end = NULL → fault активен прямо сейчас.
 --    Заполняется DB_MQTT при обработке регистров с unit = 'fault_bitmap'.
---    Все severity (warning / shutdown / unknown) пишутся в events.
+--    Все severity (warning / shutdown / shutdown_cooldown / derate / none / unknown) пишутся в events.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS fault_history (
@@ -410,7 +410,7 @@ CREATE TABLE IF NOT EXISTS fault_history (
     bit               INT          NOT NULL,        -- номер бита (0..15)
     fault_name        TEXT,                         -- название (English) из telemetry2
     fault_description TEXT,                         -- описание (русский) из telemetry2
-    severity          TEXT,                         -- warning | shutdown | unknown
+    severity          TEXT,                         -- warning | shutdown | shutdown_cooldown | derate | none | unknown
     fault_start       TIMESTAMPTZ  NOT NULL,        -- когда fault появился
     fault_end         TIMESTAMPTZ,                  -- когда пропал (NULL = активен)
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT now()
