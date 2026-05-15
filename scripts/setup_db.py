@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CG DB-Writer v2.1.0 — подготовка PostgreSQL/TimescaleDB.
+"""CG DB-Writer v2.2.1 — подготовка PostgreSQL/TimescaleDB.
 
 Использование:
   python scripts/setup_db.py --config config.yml [--drop]
@@ -35,6 +35,8 @@ EXPECTED_TABLES = [
     "state_events",
     "parameter_history",
     "events",
+    "data_gaps",
+    "fault_history",
     "share_links",
 ]
 
@@ -138,7 +140,7 @@ async def setup(cfg, drop: bool) -> None:
             for tbl in (
                 "history", "gps_raw_history", "gps_latest_filtered",
                 "latest_state", "state_events", "parameter_history",
-                "events", "share_links",
+                "events", "data_gaps", "fault_history", "share_links",
                 "equipment", "register_catalog", "objects",
             ):
                 await conn.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
@@ -208,7 +210,7 @@ async def setup(cfg, drop: bool) -> None:
         print(f"  history (raw):    {ret.history_raw_days} days")
         print(f"  history_1min:     {ret.history_1min_days} days")
         print(f"  history_1hour:    {ret.history_1hour_years} years")
-        print("\nDone! CG DB-Writer v2.1.0 schema is ready.")
+        print("\nDone! CG DB-Writer v2.2.1 schema is ready.")
 
     finally:
         await conn.close()
@@ -235,7 +237,7 @@ async def _ensure_role(conn, rolname: str, password: str) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="CG DB-Writer v2.1.0 — setup database")
+    p = argparse.ArgumentParser(description="CG DB-Writer v2.2.1 — setup database")
     p.add_argument("-c", "--config", default="config.yml", help="Path to config.yml")
     p.add_argument("--drop", action="store_true", help="Drop and recreate all tables")
     args = p.parse_args()
