@@ -26,8 +26,15 @@ def resolve_params(
     addr: int,
     catalog_row: Any | None,
     kpi_map: dict[tuple[str, int], Any],
+    mqtt_unit: str | None = None,
 ) -> _RegParams:
     """Определить параметры для addr: catalog → kpi → defaults.
+
+    mqtt_unit — значение поля 'unit' из пакета декодера.
+    Используется как fallback для определения register_kind когда
+    регистр отсутствует в register_catalog:
+      - unit is None  → enum (state_events)
+      - unit не None  → analog (history)
 
     kpi_map передаётся снаружи (вычислен один раз на сообщение).
     """
@@ -38,9 +45,19 @@ def resolve_params(
     heartbeat    = d.heartbeat_sec
     store        = d.store_history
     vk           = d.value_kind
-    rk           = "analog"   # register_kind default
 
-    # Перекрываем из register_catalog
+    # Если регистр не в catalog — тип определяем по unit из декодера:
+    #   unit == None → enum/discrete (state_events)
+    #   unit задан   → analog (history)
+    if catalog_row is None:
+        rk = "enum" if mqtt_unit is None else "analog"
+        if rk == "enum":
+            vk = "enum"
+            tolerance = None
+    else:
+        rk = "analog"
+
+    # Перекрываем из register_catalog (всегда имеет приоритет)
     if catalog_row is not None:
         if catalog_row["tolerance"] is not None:
             tolerance = float(catalog_row["tolerance"])

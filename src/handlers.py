@@ -595,8 +595,10 @@ def _process_register(
             ))
 
     # Параметры записи из catalog / kpi / defaults
+    # mqtt_unit передаём для автоопределения типа когда регистр не в catalog:
+    #   unit=None → enum (state_events), unit задан → analog (history)
     catalog_row = catalog_map.get(addr)
-    params = resolve_params(cfg, equip_type, addr, catalog_row, kpi_map)
+    params = resolve_params(cfg, equip_type, addr, catalog_row, kpi_map, mqtt_unit=unit)
     key = (router_sn, equip_type, panel_id, addr)
     last_ts = _last_write_ts.get(key)
 
