@@ -398,22 +398,26 @@ CREATE INDEX IF NOT EXISTS idx_data_gaps_open
 --    Каждая строка = один fault-бит за период его активности.
 --    fault_end = NULL → fault активен прямо сейчас.
 --    Заполняется DB_MQTT при обработке регистров с unit = 'fault_bitmap'.
---    Fault severity = 'shutdown' дополнительно пишется в events.
+--    Все severity (warning / shutdown / unknown) пишутся в events.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS fault_history (
-    id          BIGSERIAL    PRIMARY KEY,
-    router_sn   TEXT         NOT NULL,
-    equip_type  TEXT         NOT NULL,
-    panel_id    INT          NOT NULL,
-    addr        INT          NOT NULL,        -- адрес регистра bitmap (напр. 40400)
-    bit         INT          NOT NULL,        -- номер бита (0..15)
-    fault_name  TEXT,                         -- название из telemetry2
-    severity    TEXT,                         -- shutdown | warning | info
-    fault_start TIMESTAMPTZ  NOT NULL,        -- когда fault появился
-    fault_end   TIMESTAMPTZ,                  -- когда пропал (NULL = активен)
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+    id                BIGSERIAL    PRIMARY KEY,
+    router_sn         TEXT         NOT NULL,
+    equip_type        TEXT         NOT NULL,
+    panel_id          INT          NOT NULL,
+    addr              INT          NOT NULL,        -- адрес регистра bitmap (напр. 40400)
+    bit               INT          NOT NULL,        -- номер бита (0..15)
+    fault_name        TEXT,                         -- название (English) из telemetry2
+    fault_description TEXT,                         -- описание (русский) из telemetry2
+    severity          TEXT,                         -- warning | shutdown | unknown
+    fault_start       TIMESTAMPTZ  NOT NULL,        -- когда fault появился
+    fault_end         TIMESTAMPTZ,                  -- когда пропал (NULL = активен)
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
+
+-- Миграция для существующих установок (без fault_description):
+ALTER TABLE fault_history ADD COLUMN IF NOT EXISTS fault_description TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_fault_history_equip
     ON fault_history (router_sn, equip_type, panel_id, addr, fault_start DESC);

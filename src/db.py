@@ -380,15 +380,17 @@ async def get_last_packet_times(conn: asyncpg.Connection) -> list[asyncpg.Record
 async def open_fault_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
     """Открыть новые fault-записи (fault_end = NULL).
 
-    Tuple: (router_sn, equip_type, panel_id, addr, bit, fault_name, severity, fault_start)
+    Tuple: (router_sn, equip_type, panel_id, addr, bit,
+            fault_name, fault_description, severity, fault_start)
     """
     if not rows:
         return
     await conn.executemany(
         """
         INSERT INTO fault_history
-          (router_sn, equip_type, panel_id, addr, bit, fault_name, severity, fault_start)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          (router_sn, equip_type, panel_id, addr, bit,
+           fault_name, fault_description, severity, fault_start)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """,
         rows,
     )

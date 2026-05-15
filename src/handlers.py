@@ -444,11 +444,13 @@ def _process_fault_bitmap(
     """Обработка регистра с unit='fault_bitmap'.
 
     - Сравниваем текущие активные биты с кэшем.
-    - Новые биты → fault_open_batch (+ event при severity='shutdown').
+    - Новые биты → fault_open_batch (+ event для любого severity).
     - Исчезнувшие биты → fault_close_batch.
-    - latest_state: value=bitmask (raw), text=JSON активных fault'ов.
+    - unknown_bits из декодера игнорируем.
+    - latest_state: value=bitmask (raw), text=JSON активных fault'ов с description.
     """
-    # Текущие активные биты из сообщения: bit → {name, severity}
+    # Текущие активные биты из сообщения: bit → {name, description, severity}
+    # unknown_bits игнорируем — биты без определения в карте декодера
     faults_list: list[dict] = value_dict.get("faults") or []
     current: dict[int, dict] = {f["bit"]: f for f in faults_list if "bit" in f}
     current_bits: set[int] = set(current.keys())
@@ -459,30 +461,45 @@ def _process_fault_bitmap(
     appeared = current_bits - prev_bits
     cleared  = prev_bits - current_bits
 
+    # Типы событий по severity
+    _SEVERITY_EVENT_TYPE = {
+        "shutdown": "fault_shutdown",
+        "warning":  "fault_warning",
+        "unknown":  "fault_unknown",
+    }
+
     # Открываем новые fault'ы
     for bit in appeared:
-        info = current[bit]
-        fault_name = info.get("name")
-        severity   = info.get("severity")
+        info        = current[bit]
+        fault_name  = info.get("name")
+        description = info.get("description")
+        severity    = info.get("severity")
         fault_open_batch.append((
             router_sn, equip_type, panel_id, addr, bit,
-            fault_name, severity, ts,
+            fault_name, description, severity, ts,
         ))
-        # Shutdown → дополнительно в events
-        if severity == "shutdown" and cfg.events_policy.enable_fault_events:
+        # Все severity пишем в events
+        if cfg.events_policy.enable_fault_events:
+            event_type = _SEVERITY_EVENT_TYPE.get(severity or "", "fault_unknown")
             payload_json = json.dumps(
-                {"addr": addr, "bit": bit, "fault_name": fault_name, "severity": severity},
+                {
+                    "addr": addr, "bit": bit,
+                    "fault_name": fault_name,
+                    "description": description,
+                    "severity": severity,
+                },
                 ensure_ascii=False,
             )
+            label = description or fault_name or f"bit={bit}"
             event_rows.append((
                 router_sn, equip_type, panel_id,
-                "fault_shutdown",
-                f"addr={addr} bit={bit} {fault_name}",
+                event_type,
+                f"addr={addr} bit={bit} {label}",
                 payload_json,
             ))
         logger.info(
-            "FAULT appeared %s/%s/%d addr=%d bit=%d severity=%s name=%s",
-            router_sn, equip_type, panel_id, addr, bit, severity, fault_name,
+            "FAULT appeared %s/%s/%d addr=%d bit=%d severity=%s name=%s desc=%s",
+            router_sn, equip_type, panel_id, addr, bit, severity, fault_name, description,
         )
 
     # Закрываем исчезнувшие fault'ы
@@ -500,8 +517,15 @@ def _process_fault_bitmap(
     text_val: str | None = None
     if faults_list:
         text_val = json.dumps(
-            [{"bit": f.get("bit"), "name": f.get("name"), "severity": f.get("severity")}
-             for f in faults_list],
+            [
+                {
+                    "bit":         f.get("bit"),
+                    "name":        f.get("name"),
+                    "description": f.get("description"),
+                    "severity":    f.get("severity"),
+                }
+                for f in faults_list
+            ],
             ensure_ascii=False,
         )
     dec_value = Decimal(str(raw_val)) if raw_val is not None else None
