@@ -77,6 +77,7 @@ class KpiRegister:
     min_interval_sec: int = 0
     heartbeat_sec: int = 60
     tolerance: float = 0.1
+    name: str = ""
 
 
 @dataclass

@@ -305,6 +305,7 @@ function renderKpiTable(kpis) {
       <tr>
         <th>Адрес</th>
         <th>Тип обор.</th>
+        <th>Название</th>
         <th>Мин. интервал</th>
         <th>Heartbeat</th>
         <th>Допуск</th>
@@ -336,6 +337,7 @@ function createKpiRow(kpi) {
   tr.innerHTML = `
     <td><input type="number" class="kpi-addr" value="${kpi.addr || 0}"></td>
     <td><input type="text" class="kpi-equip" value="${kpi.equip_type || 'pcc'}"></td>
+    <td><input type="text" class="kpi-name" value="${kpi.name || ''}" placeholder="Название регистра"></td>
     <td><input type="number" class="kpi-min-interval" value="${kpi.min_interval_sec || 0}"></td>
     <td><input type="number" class="kpi-heartbeat" value="${kpi.heartbeat_sec || 60}"></td>
     <td><input type="number" step="0.01" class="kpi-tolerance" value="${kpi.tolerance || 0}"></td>
@@ -389,6 +391,7 @@ function collectKpi() {
     kpis.push({
       addr: Number(row.querySelector(".kpi-addr").value) || 0,
       equip_type: row.querySelector(".kpi-equip").value || "pcc",
+      name: row.querySelector(".kpi-name").value || "",
       min_interval_sec: Number(row.querySelector(".kpi-min-interval").value) || 0,
       heartbeat_sec: Number(row.querySelector(".kpi-heartbeat").value) || 60,
       tolerance: Number(row.querySelector(".kpi-tolerance").value) || 0,

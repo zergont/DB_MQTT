@@ -68,18 +68,21 @@ history_policy:
 
   # KPI регистры — высокая частота, per-register настройки
   kpi_registers:
-    - addr: 40034             # GensetTotal kW (Нагрузка)
+    - addr: 40034
       equip_type: "pcc"
+      name: "GensetTotal kW (Нагрузка)"
       min_interval_sec: 0     # каждый пакет (ограничение только по tolerance)
       heartbeat_sec: 60
       tolerance: 0.5
-    - addr: 40062             # OilPressure (Давление масла двигателя)
+    - addr: 40062
       equip_type: "pcc"
+      name: "OilPressure (Давление масла)"
       min_interval_sec: 0
       heartbeat_sec: 60
       tolerance: 0.1
-    - addr: 40070             # Наработка
+    - addr: 40070
       equip_type: "pcc"
+      name: "Наработка"
       min_interval_sec: 5
       heartbeat_sec: 300
       tolerance: 1
