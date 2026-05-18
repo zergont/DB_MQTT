@@ -629,13 +629,13 @@ def _process_register(
             _update_last_write_ts(key, now)
 
     elif params.register_kind in ("discrete", "enum"):
-        # Состояния: change + heartbeat (для детекции gap'ов)
+        # Состояния: только изменение — gap detection на уровне оборудования (data_gaps)
         decision = should_write(
             params,
             new_value=dec_value, new_raw=raw_val, new_text=text, new_reason=reason,
             prev_value=prev_value, prev_raw=prev_raw, prev_text=prev_text, prev_reason=prev_reason,
             last_write_ts=last_ts, now=now,
-            use_heartbeat=True,
+            use_heartbeat=False,
         )
         if decision.write:
             state_batch.append((

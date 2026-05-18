@@ -91,7 +91,7 @@ events_policy:
   panel_stale_sec: 120
   panel_offline_sec: 300
   check_interval_sec: 30
-  enable_gps_reject_events: true
+  enable_gps_reject_events: false
   enable_unknown_register_events: true
   enable_fault_events: true         # shutdown fault → дополнительно в events
 
