@@ -2,6 +2,26 @@
 
 Все заметные изменения в проекте фиксируются в этом файле.
 
+## [2.3.3] - 2026-05-18
+
+### Added
+- Поля `manufacturer`, `model`, `engine_sn` в таблице `equipment`
+- Секция **«Оборудование»** в веб-интерфейсе с инлайн-редактированием метаданных
+- API: `GET /api/equipment`, `PUT /api/equipment`
+- `src/web/equipment_api.py` — обработчики API оборудования
+- Миграция через `ALTER TABLE IF NOT EXISTS` — безопасна для существующих БД
+
+## [2.3.2] - 2026-05-18
+
+### Added
+- Поле `name` для KPI регистров в `config.yml` и веб-интерфейсе
+
+## [2.3.1] - 2026-05-18
+
+### Changed
+- Дискретные/enum регистры (`state_events`): убран heartbeat — запись только при изменении значения. Gap detection на уровне оборудования через `data_gaps` делает heartbeat регистров избыточным.
+- `enable_gps_reject_events: false` в `config.example.yml` — для стационарного оборудования GPS reject события не несут ценности.
+
 ## [1.1.0] - 2026-07-14
 
 ### Added

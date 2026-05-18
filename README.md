@@ -12,10 +12,63 @@
 
 ### Ключевые принципы
 - **latest_state** — фиксированный объём, всегда актуальный срез.
-- **history** — только изменения (с tolerance/deadband) + heartbeat для KPI.
-- **events** — offline/online переходы, GPS reject, unknown register.
-- **GPS anti-teleport** — фильтрация скачков с confirm-буфером.
-- БД не раздувается: retention автоматически чистит старые данные.
+- **history** — аналоговые регистры: только изменения (tolerance/deadband) + heartbeat. Дискретные/enum — только изменения, без heartbeat.
+- **events** — offline/online переходы, фолты. GPS reject и unknown_register отключены по умолчанию.
+- **Gap detection** — разрывы связи на уровне оборудования через `data_gaps`, не через heartbeat регистров.
+- **GPS anti-teleport** — фильтрация скачков с confirm-буфером. Для стационарного оборудования GPS reject события можно отключить.
+- БД не раздувается: TimescaleDB retention + compression автоматически.
+
+---
+
+## Идентификация оборудования
+
+Каждая единица оборудования идентифицируется тройкой:
+
+```
+(router_sn, equip_type, panel_id)
+```
+
+| Поле | Пример | Описание |
+|---|---|---|
+| `router_sn` | `R-00123` | Серийный номер роутера (из MQTT-топика) |
+| `equip_type` | `pcc`, `yfm8` | Тип подключённого устройства |
+| `panel_id` | `1` | Номер панели на роутере |
+
+К одному роутеру может быть подключено несколько типов оборудования:
+
+```
+R-00123 / pcc  / 1  — основная панель управления ДЭС
+R-00123 / yfm8 / 1  — датчик контроля масла
+```
+
+Дополнительные метаданные физического оборудования хранятся в таблице `equipment`:
+
+| Поле | Пример | Описание |
+|---|---|---|
+| `manufacturer` | `Cummins` | Производитель |
+| `model` | `KTA50` | Модель двигателя |
+| `engine_sn` | `1345988` | Серийный номер двигателя |
+| `name` | `Основная панель` | Произвольное название |
+
+Заполняются вручную через веб-интерфейс (секция **«Оборудование»**).
+
+---
+
+## Веб-интерфейс
+
+Сервис поднимает веб-интерфейс на том же порту что `/health` (по умолчанию `8765`):
+
+```
+http://<server>:8765/
+```
+
+Доступные секции:
+- **Оборудование** — метаданные (производитель, модель, серийник мотора)
+- **MQTT / PostgreSQL / Ingest** — параметры подключения и очередей
+- **GPS фильтр** — пороги антителепорта
+- **Политика записи истории** — tolerance, heartbeat, KPI регистры
+- **Политика событий** — пороги stale/offline
+- Кнопки: **Сохранить конфиг**, **Перезапустить сервис**, **Скачать/Восстановить конфиг**
 
 ---
 
@@ -334,17 +387,18 @@ FROM history
 WHERE router_sn = '6003790403' AND panel_id = 1
 ORDER BY id DESC LIMIT 10;
 
--- event для unknown register (если enable_unknown_register_events=true)
+-- event для unknown register (только если enable_unknown_register_events=true, по умолчанию false)
 SELECT * FROM events WHERE type = 'unknown_register';
 ```
 
-**Проверить heartbeat KPI:** подождите `heartbeat_sec` (60 сек в конфиге для KPI) без изменения значений, затем:
+**Проверить heartbeat (аналоговые регистры):** подождите `heartbeat_sec` (60 сек для KPI) без изменения значений:
 ```sql
 SELECT addr, write_reason, ts
 FROM history
 WHERE router_sn = '6003790403' AND addr IN (40034, 40062)
 ORDER BY id DESC LIMIT 10;
 -- Должны появиться записи с write_reason='heartbeat'
+-- Для дискретных/enum регистров heartbeat не пишется — только изменения
 ```
 
 ### Проверка events (offline/online)
@@ -398,13 +452,20 @@ cg-db-writer/
 │   ├── health.py               # HTTP health endpoint
 │   ├── config.py               # Загрузка config.yml
 │   ├── log.py                  # Настройка логирования
+│   ├── version.py              # Чтение файла VERSION
 │   ├── db.py                   # Все SQL операции (asyncpg)
 │   ├── handlers.py             # Обработка MQTT сообщений
 │   ├── gps_filter.py           # GPS anti-teleport фильтр
 │   ├── history_policy.py       # Логика «писать ли в history»
-│   ├── aggregation.py          # [tombstone] заменена TimescaleDB Continuous Aggregates
 │   ├── watchdog.py             # Мониторинг online/offline/stale
-│   └── retention.py            # [tombstone] заменена TimescaleDB Retention Policies
+│   └── web/
+│       ├── routes.py           # Регистрация маршрутов
+│       ├── config_api.py       # API конфигурации (GET/PUT /api/config)
+│       ├── equipment_api.py    # API оборудования (GET/PUT /api/equipment)
+│       └── static/
+│           ├── index.html      # Веб-интерфейс
+│           ├── app.js          # Логика интерфейса
+│           └── style.css       # Стили
 ├── scripts/
 │   ├── install.sh              # Автоустановка на Ubuntu
 │   ├── update.sh               # Обновление установленного сервиса
@@ -431,7 +492,8 @@ cg-db-writer/
 | `postgres` | Подключение к БД, размер пула |
 | `gps_filter` | Пороги anti-teleport (sats, fix, jump, speed, confirm) |
 | `history_policy` | Tolerance, min_interval, heartbeat, KPI регистры |
-| `events_policy` | Пороги stale/offline, включение GPS/unknown events |
+| `events_policy` | Пороги stale/offline, включение GPS reject / unknown register events |
+| `web_ui` | Включить/выключить веб-интерфейс |
 | `retention` | Информационные сроки хранения (TimescaleDB управляет автоматически) |
 | `logging` | Уровень, файл, JSON формат |
 
