@@ -11,6 +11,7 @@ let _dirty = false;
 document.addEventListener("DOMContentLoaded", async () => {
   await loadConfig();
   await loadHealth();
+  await loadEquipment();
   initSectionToggles();
   initButtons();
 });
@@ -452,6 +453,102 @@ function showToast(msg, type) {
   toast.textContent = msg;
   requestAnimationFrame(() => toast.classList.add("show"));
   setTimeout(() => toast.classList.remove("show"), 3000);
+}
+
+// ── Оборудование ──────────────────────────────────────────────────────────
+
+let _equipment = [];
+
+async function loadEquipment() {
+  try {
+    const resp = await fetch("/api/equipment");
+    if (!resp.ok) throw new Error(await resp.text());
+    _equipment = await resp.json();
+    renderEquipment(_equipment);
+  } catch (e) {
+    showToast("Ошибка загрузки оборудования: " + e.message, "error");
+  }
+}
+
+async function saveEquipment() {
+  const rows = document.querySelectorAll("#equip-tbody tr");
+  const items = [];
+  for (const row of rows) {
+    items.push({
+      router_sn:    row.dataset.routerSn,
+      equip_type:   row.dataset.equipType,
+      panel_id:     Number(row.dataset.panelId),
+      name:         row.querySelector(".eq-name").value,
+      manufacturer: row.querySelector(".eq-manufacturer").value,
+      model:        row.querySelector(".eq-model").value,
+      engine_sn:    row.querySelector(".eq-engine-sn").value,
+    });
+  }
+  try {
+    const resp = await fetch("/api/equipment", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(items),
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || "Ошибка сохранения");
+    showToast("Оборудование сохранено", "success");
+  } catch (e) {
+    showToast("Ошибка: " + e.message, "error");
+  }
+}
+
+function renderEquipment(items) {
+  const container = document.getElementById("body-equipment");
+  if (!container) return;
+
+  if (!items.length) {
+    container.innerHTML = "<p style='color:#888;padding:8px'>Оборудование не зарегистрировано</p>";
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "kpi-table";
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>Роутер</th>
+        <th>Тип</th>
+        <th>Панель</th>
+        <th>Название</th>
+        <th>Производитель</th>
+        <th>Модель</th>
+        <th>Серийник мотора</th>
+      </tr>
+    </thead>
+    <tbody id="equip-tbody"></tbody>
+  `;
+  container.appendChild(table);
+
+  const tbody = table.querySelector("#equip-tbody");
+  for (const eq of items) {
+    const tr = document.createElement("tr");
+    tr.dataset.routerSn  = eq.router_sn;
+    tr.dataset.equipType = eq.equip_type;
+    tr.dataset.panelId   = eq.panel_id;
+    tr.innerHTML = `
+      <td><span class="eq-readonly">${eq.router_sn}</span></td>
+      <td><span class="eq-readonly">${eq.equip_type}</span></td>
+      <td><span class="eq-readonly">${eq.panel_id}</span></td>
+      <td><input type="text" class="eq-name"         value="${eq.name         || ''}" placeholder="Название"></td>
+      <td><input type="text" class="eq-manufacturer" value="${eq.manufacturer || ''}" placeholder="Cummins"></td>
+      <td><input type="text" class="eq-model"        value="${eq.model        || ''}" placeholder="KTA50"></td>
+      <td><input type="text" class="eq-engine-sn"    value="${eq.engine_sn    || ''}" placeholder="1345988"></td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "btn btn-primary btn-sm";
+  saveBtn.style.marginTop = "8px";
+  saveBtn.textContent = "Сохранить оборудование";
+  saveBtn.addEventListener("click", saveEquipment);
+  container.appendChild(saveBtn);
 }
 
 // ── Section toggles ────────────────────────────────────────────────────────

@@ -75,6 +75,43 @@ async def upsert_equipment(
     )
 
 
+async def get_all_equipment(conn: asyncpg.Connection) -> list[asyncpg.Record]:
+    """Все записи equipment с метаданными объекта."""
+    return await conn.fetch(
+        """
+        SELECT
+            e.router_sn, e.equip_type, e.panel_id,
+            e.name, e.manufacturer, e.model, e.engine_sn,
+            e.first_seen_at, e.last_seen_at,
+            o.name AS object_name
+        FROM equipment e
+        JOIN objects o ON o.router_sn = e.router_sn
+        ORDER BY e.router_sn, e.equip_type, e.panel_id
+        """
+    )
+
+
+async def update_equipment_meta(
+    conn: asyncpg.Connection,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    name: str | None,
+    manufacturer: str | None,
+    model: str | None,
+    engine_sn: str | None,
+) -> None:
+    """Обновить метаданные оборудования (название, производитель, модель, серийник)."""
+    await conn.execute(
+        """
+        UPDATE equipment
+        SET name=$4, manufacturer=$5, model=$6, engine_sn=$7
+        WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+        """,
+        router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # GPS
 # ─────────────────────────────────────────────────────────────────────────────

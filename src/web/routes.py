@@ -13,6 +13,10 @@ from src.web.config_api import (
     handle_config_upload,
     handle_restart,
 )
+from src.web.equipment_api import (
+    handle_equipment_get,
+    handle_equipment_put,
+)
 
 
 def setup_routes(app: web.Application, config_path: Path) -> None:
@@ -30,6 +34,10 @@ def setup_routes(app: web.Application, config_path: Path) -> None:
     app.router.add_get("/api/config/download", handle_config_download)
     app.router.add_post("/api/config/upload", handle_config_upload)
     app.router.add_post("/api/restart", handle_restart)
+
+    # API оборудования
+    app.router.add_get("/api/equipment", handle_equipment_get)
+    app.router.add_put("/api/equipment", handle_equipment_put)
 
     # Статика (CSS, JS)
     app.router.add_static("/static", static_dir, show_index=False)

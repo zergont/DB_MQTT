@@ -37,10 +37,18 @@ CREATE TABLE IF NOT EXISTS equipment (
     equip_type      TEXT        NOT NULL,
     panel_id        INT         NOT NULL,
     name            TEXT,
+    manufacturer    TEXT,
+    model           TEXT,
+    engine_sn       TEXT,
     first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (router_sn, equip_type, panel_id)
 );
+
+-- Миграция для существующих установок
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS manufacturer TEXT;
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS model        TEXT;
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS engine_sn    TEXT;
 
 -- register_kind:
 --   analog    — измерение (ток, напряжение, мощность) → history + CA агрегация
