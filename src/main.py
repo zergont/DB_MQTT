@@ -21,7 +21,14 @@ import aiomqtt
 from src import db
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
-from src.handlers import dispatch, get_gps_filter, restore_fault_bits, restore_gap_tracker, restore_write_timestamps
+from src.handlers import (
+    dispatch,
+    get_gps_filter,
+    restore_enum_states,
+    restore_fault_bits,
+    restore_gap_tracker,
+    restore_write_timestamps,
+)
 from src.health import HealthState, health_loop
 from src.log import setup_logging
 from src.version import get_version
@@ -141,9 +148,13 @@ async def _mqtt_ingest_loop(
                 keepalive=mc.keepalive,
                 tls_params=aiomqtt.TLSParameters() if mc.tls else None,
             ) as client:
+                await client.subscribe(mc.sub_maps)
                 await client.subscribe(mc.sub_decoded)
                 await client.subscribe(mc.sub_telemetry)
-                logger.info("MQTT connected, subscribed: %s, %s", mc.sub_decoded, mc.sub_telemetry)
+                logger.info(
+                    "MQTT connected, subscribed: %s, %s, %s",
+                    mc.sub_maps, mc.sub_decoded, mc.sub_telemetry,
+                )
                 delay = mc.reconnect_min_delay
 
                 async for msg in client.messages:
@@ -253,6 +264,7 @@ async def _run(cfg: AppConfig, config_path: Path) -> None:
         await restore_write_timestamps()
         await restore_gap_tracker()
         await restore_fault_bits()
+        await restore_enum_states()
 
         tasks: list[asyncio.Task] = [
             asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded), name="mqtt_ingest"),

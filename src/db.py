@@ -180,23 +180,19 @@ async def get_gps_latest(
 async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
     """Batch upsert latest_state.
 
-    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw, text, unit, name, reason)
+    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw)
     """
     if not rows:
         return
     await conn.executemany(
         """
         INSERT INTO latest_state
-          (router_sn, equip_type, panel_id, addr, ts, value, raw, text, unit, name, reason, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+          (router_sn, equip_type, panel_id, addr, ts, value, raw, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7, now())
         ON CONFLICT (router_sn, equip_type, panel_id, addr) DO UPDATE SET
           ts         = EXCLUDED.ts,
           value      = EXCLUDED.value,
           raw        = EXCLUDED.raw,
-          text       = EXCLUDED.text,
-          unit       = EXCLUDED.unit,
-          name       = EXCLUDED.name,
-          reason     = EXCLUDED.reason,
           updated_at = now()
         """,
         rows,
@@ -228,9 +224,9 @@ async def get_latest_state_rows_many(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def insert_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
-    """Batch insert в history (аналоговые регистры).
+    """Batch insert в history (все типы регистров: аналог, enum, fault raw).
 
-    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw, text, reason, write_reason)
+    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw)
     ts — NOT NULL (TimescaleDB hypertable partition key).
     """
     if not rows:
@@ -238,53 +234,12 @@ async def insert_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> N
     await conn.executemany(
         """
         INSERT INTO history
-          (router_sn, equip_type, panel_id, addr, ts, value, raw, text, reason, write_reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          (router_sn, equip_type, panel_id, addr, ts, value, raw)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
         """,
         rows,
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# State events (дискретные / enum регистры → plain PostgreSQL)
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def insert_state_event_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
-    """Batch insert в state_events.
-
-    Tuple: (router_sn, equip_type, panel_id, addr, ts, raw, text, write_reason)
-    """
-    if not rows:
-        return
-    await conn.executemany(
-        """
-        INSERT INTO state_events
-          (router_sn, equip_type, panel_id, addr, ts, raw, text, write_reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        """,
-        rows,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Parameter history (уставки / настройки → plain PostgreSQL)
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def insert_parameter_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
-    """Batch insert в parameter_history.
-
-    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw, text)
-    """
-    if not rows:
-        return
-    await conn.executemany(
-        """
-        INSERT INTO parameter_history
-          (router_sn, equip_type, panel_id, addr, ts, value, raw, text)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        """,
-        rows,
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,27 +280,6 @@ async def insert_event_batch(conn: asyncpg.Connection, rows: list[tuple]) -> Non
         rows,
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Register catalog
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def get_register_catalog_rows_many(
-    conn: asyncpg.Connection,
-    equip_type: str,
-    addrs: list[int],
-) -> dict[int, asyncpg.Record]:
-    """Одним запросом выбрать register_catalog для набора addr."""
-    if not addrs:
-        return {}
-    rows = await conn.fetch(
-        """
-        SELECT * FROM register_catalog
-        WHERE equip_type = $1 AND addr = ANY($2::int[])
-        """,
-        equip_type, addrs,
-    )
-    return {int(r["addr"]): r for r in rows}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -417,17 +351,16 @@ async def get_last_packet_times(conn: asyncpg.Connection) -> list[asyncpg.Record
 async def open_fault_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
     """Открыть новые fault-записи (fault_end = NULL).
 
-    Tuple: (router_sn, equip_type, panel_id, addr, bit,
-            fault_name, fault_description, severity, fault_start)
+    Tuple: (router_sn, equip_type, panel_id, addr, bit, fault_start)
+    name/severity живут в cg/v1/maps/<device_type>, не в БД.
     """
     if not rows:
         return
     await conn.executemany(
         """
         INSERT INTO fault_history
-          (router_sn, equip_type, panel_id, addr, bit,
-           fault_name, fault_description, severity, fault_start)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          (router_sn, equip_type, panel_id, addr, bit, fault_start)
+        VALUES ($1, $2, $3, $4, $5, $6)
         """,
         rows,
     )
@@ -449,6 +382,56 @@ async def close_faults_batch(conn: asyncpg.Connection, rows: list[tuple]) -> Non
           AND fault_end IS NULL
         """,
         rows,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Enum history — периоды активности enum-состояний
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def open_enum_state_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+    """Открыть новые enum-состояния (state_end = NULL).
+
+    Tuple: (router_sn, equip_type, panel_id, addr, value, state_start)
+    """
+    if not rows:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO enum_history
+          (router_sn, equip_type, panel_id, addr, value, state_start)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        rows,
+    )
+
+
+async def close_enum_states_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+    """Закрыть активные enum-состояния (state_end IS NULL → state_end = ts).
+
+    Tuple: (router_sn, equip_type, panel_id, addr, state_end)
+    """
+    if not rows:
+        return
+    await conn.executemany(
+        """
+        UPDATE enum_history
+        SET state_end = $5
+        WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3 AND addr=$4
+          AND state_end IS NULL
+        """,
+        rows,
+    )
+
+
+async def get_open_enum_states(conn: asyncpg.Connection) -> list[asyncpg.Record]:
+    """Все незакрытые enum-состояния (для восстановления при старте)."""
+    return await conn.fetch(
+        """
+        SELECT router_sn, equip_type, panel_id, addr, value
+        FROM enum_history
+        WHERE state_end IS NULL
+        """
     )
 
 

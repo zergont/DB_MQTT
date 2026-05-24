@@ -119,13 +119,15 @@ CREATE TABLE IF NOT EXISTS latest_state (
     ts          TIMESTAMPTZ,
     value       NUMERIC,
     raw         INT,
-    text        TEXT,
-    unit        TEXT,
-    name        TEXT,
-    reason      TEXT,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (router_sn, equip_type, panel_id, addr)
 );
+
+-- Миграция для существующих установок
+ALTER TABLE latest_state DROP COLUMN IF EXISTS text;
+ALTER TABLE latest_state DROP COLUMN IF EXISTS unit;
+ALTER TABLE latest_state DROP COLUMN IF EXISTS name;
+ALTER TABLE latest_state DROP COLUMN IF EXISTS reason;
 
 CREATE INDEX IF NOT EXISTS idx_latest_state_updated
     ON latest_state (router_sn, equip_type, panel_id, updated_at DESC);
@@ -148,11 +150,13 @@ CREATE TABLE IF NOT EXISTS history (
     ts              TIMESTAMPTZ NOT NULL,
     received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     value           NUMERIC,
-    raw             INT,
-    text            TEXT,
-    reason          TEXT,
-    write_reason    TEXT        NOT NULL   -- 'change' | 'heartbeat'
+    raw             INT
 );
+
+-- Миграция для существующих установок
+ALTER TABLE history DROP COLUMN IF EXISTS text;
+ALTER TABLE history DROP COLUMN IF EXISTS reason;
+ALTER TABLE history DROP COLUMN IF EXISTS write_reason;
 
 SELECT create_hypertable(
     'history', 'ts',
@@ -401,7 +405,35 @@ CREATE INDEX IF NOT EXISTS idx_data_gaps_open
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 11. Fault history — история отдельных fault-битов
+-- 11. Enum history — периоды активности enum-состояний
+--
+--    Каждая строка = одно состояние за период его активности.
+--    state_end = NULL → состояние активно прямо сейчас.
+--    Числовой код (value) → метка берётся из cg/v1/maps/<device_type>.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS enum_history (
+    id          BIGSERIAL    PRIMARY KEY,
+    router_sn   TEXT         NOT NULL,
+    equip_type  TEXT         NOT NULL,
+    panel_id    INT          NOT NULL,
+    addr        INT          NOT NULL,
+    value       INT          NOT NULL,   -- числовой код состояния
+    state_start TIMESTAMPTZ  NOT NULL,   -- когда состояние началось
+    state_end   TIMESTAMPTZ,             -- когда закончилось (NULL = активно)
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_enum_history_equip
+    ON enum_history (router_sn, equip_type, panel_id, addr, state_start DESC);
+
+CREATE INDEX IF NOT EXISTS idx_enum_history_open
+    ON enum_history (router_sn, equip_type, panel_id, addr)
+    WHERE state_end IS NULL;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 12. Fault history — история отдельных fault-битов
 --
 --    Каждая строка = один fault-бит за период его активности.
 --    fault_end = NULL → fault активен прямо сейчас.
@@ -410,22 +442,22 @@ CREATE INDEX IF NOT EXISTS idx_data_gaps_open
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS fault_history (
-    id                BIGSERIAL    PRIMARY KEY,
-    router_sn         TEXT         NOT NULL,
-    equip_type        TEXT         NOT NULL,
-    panel_id          INT          NOT NULL,
-    addr              INT          NOT NULL,        -- адрес регистра bitmap (напр. 40400)
-    bit               INT          NOT NULL,        -- номер бита (0..15)
-    fault_name        TEXT,                         -- название (English) из telemetry2
-    fault_description TEXT,                         -- описание (русский) из telemetry2
-    severity          TEXT,                         -- warning | shutdown | shutdown_cooldown | derate | none | unknown
-    fault_start       TIMESTAMPTZ  NOT NULL,        -- когда fault появился
-    fault_end         TIMESTAMPTZ,                  -- когда пропал (NULL = активен)
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now()
+    id          BIGSERIAL    PRIMARY KEY,
+    router_sn   TEXT         NOT NULL,
+    equip_type  TEXT         NOT NULL,
+    panel_id    INT          NOT NULL,
+    addr        INT          NOT NULL,   -- адрес регистра bitmap (напр. 40400)
+    bit         INT          NOT NULL,   -- номер бита (0..15)
+    fault_start TIMESTAMPTZ  NOT NULL,   -- когда fault появился
+    fault_end   TIMESTAMPTZ,             -- когда пропал (NULL = активен)
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
--- Миграция для существующих установок (без fault_description):
-ALTER TABLE fault_history ADD COLUMN IF NOT EXISTS fault_description TEXT;
+-- Миграция для существующих установок:
+-- name/description/severity живут в cg/v1/maps/<device_type>, не в БД
+ALTER TABLE fault_history DROP COLUMN IF EXISTS fault_name;
+ALTER TABLE fault_history DROP COLUMN IF EXISTS fault_description;
+ALTER TABLE fault_history DROP COLUMN IF EXISTS severity;
 
 CREATE INDEX IF NOT EXISTS idx_fault_history_equip
     ON fault_history (router_sn, equip_type, panel_id, addr, fault_start DESC);

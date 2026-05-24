@@ -1,4 +1,4 @@
-"""CG DB-Writer v2.1.0 — обработка входящих MQTT сообщений."""
+"""CG DB-Writer — обработка входящих MQTT сообщений."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from typing import Any
 
 import asyncpg
 
-from src import db
+from src import db, register_map
 from src.config import AppConfig
 from src.gps_filter import GpsFilter, GpsPoint, GpsVerdict, haversine_m
-from src.history_policy import WriteDecision, _RegParams, resolve_params, should_write
+from src.history_policy import WriteDecision, resolve_params, should_write
 
 logger = logging.getLogger("cg.handler")
 
@@ -22,26 +22,31 @@ logger = logging.getLogger("cg.handler")
 _gps_filters: dict[str, GpsFilter] = {}
 
 # Кэш последней записи: (router_sn, equip_type, panel_id, addr) → datetime
-# Используется для аналоговых регистров (history) и состояний (state_events).
 _last_write_ts: dict[tuple[str, str, int, int], datetime] = {}
-
-# Предупреждение при росте кэша (не критично, но стоит мониторить)
 _WRITE_TS_CACHE_WARN = 100_000
 
 # ── Gap detection ───────────────────────────────────────────────────────────
 # Трекер на уровне оборудования (router_sn, equip_type, panel_id).
-# Хранит время последнего полученного пакета (ДО сжатия/фильтрации).
-# Скользящее среднее интервала обновляется экспоненциально (EMA).
+# Использует device-time (ts из payload) для корректной обработки буферизации.
 
-_GAP_MULTIPLIER = 5  # elapsed > avg_interval × N → gap
-
+_GAP_MULTIPLIER = 5
 _last_packet_ts: dict[tuple[str, str, int], datetime] = {}
-_avg_interval: dict[tuple[str, str, int], float] = {}  # секунды (EMA)
-_EMA_ALPHA = 0.1  # сглаживание: 0.1 = медленная адаптация
+_avg_interval:   dict[tuple[str, str, int], float] = {}
+_EMA_ALPHA = 0.1
+
+# Трекер открытых gap'ов
+_open_gaps: dict[tuple[str, str, int], bool] = {}
+
+# Кэш активных fault-битов: (router_sn, equip_type, panel_id, addr) → set of bit numbers
+_active_fault_bits: dict[tuple[str, str, int, int], set[int]] = {}
+
+# Кэш активных enum-состояний: (router_sn, equip_type, panel_id, addr) → value (int)
+_active_enum_states: dict[tuple[str, str, int, int], int] = {}
 
 # Regex для разбора топиков
 _RE_TELEMETRY = re.compile(r"^cg/v1/telemetry/SN/([^/]+)$")
 _RE_DECODED   = re.compile(r"^cg/v1/decoded/SN/([^/]+)/([^/]+)/(\d+)$")
+_RE_MAPS      = re.compile(r"^cg/v1/maps/([^/]+)$")
 
 
 def get_gps_filter(router_sn: str, cfg: AppConfig) -> GpsFilter:
@@ -50,19 +55,12 @@ def get_gps_filter(router_sn: str, cfg: AppConfig) -> GpsFilter:
     return _gps_filters[router_sn]
 
 
-# Трекер открытых gap'ов: (router_sn, equip_type, panel_id) → True если gap открыт
-_open_gaps: dict[tuple[str, str, int], bool] = {}
-
-# Кэш активных fault-битов: (router_sn, equip_type, panel_id, addr) → set of bit numbers
-_active_fault_bits: dict[tuple[str, str, int, int], set[int]] = {}
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup restore
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def restore_write_timestamps() -> None:
-    """При старте загрузить _last_write_ts из БД для аналоговых и state-регистров."""
+    """При старте загрузить _last_write_ts из history."""
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
             "SELECT router_sn, equip_type, panel_id, addr, max(received_at) AS last_ts "
@@ -71,21 +69,8 @@ async def restore_write_timestamps() -> None:
         for r in rows:
             key = (r["router_sn"], r["equip_type"], r["panel_id"], r["addr"])
             _last_write_ts[key] = r["last_ts"]
-        analog_count = len(_last_write_ts)
 
-        rows = await conn.fetch(
-            "SELECT router_sn, equip_type, panel_id, addr, max(received_at) AS last_ts "
-            "FROM state_events GROUP BY router_sn, equip_type, panel_id, addr"
-        )
-        for r in rows:
-            key = (r["router_sn"], r["equip_type"], r["panel_id"], r["addr"])
-            _last_write_ts[key] = r["last_ts"]
-
-    logger.info(
-        "Restored write timestamps: %d analog, %d state registers",
-        analog_count,
-        len(_last_write_ts) - analog_count,
-    )
+    logger.info("Restored write timestamps: %d registers", len(_last_write_ts))
 
 
 async def restore_fault_bits() -> None:
@@ -97,33 +82,36 @@ async def restore_fault_bits() -> None:
             if key not in _active_fault_bits:
                 _active_fault_bits[key] = set()
             _active_fault_bits[key].add(r["bit"])
-    logger.info("Restored fault bits: %d active faults across %d registers",
-                sum(len(v) for v in _active_fault_bits.values()), len(_active_fault_bits))
+    logger.info(
+        "Restored fault bits: %d active faults across %d registers",
+        sum(len(v) for v in _active_fault_bits.values()), len(_active_fault_bits),
+    )
+
+
+async def restore_enum_states() -> None:
+    """При старте загрузить активные enum-состояния из enum_history WHERE state_end IS NULL."""
+    async with db.pool().acquire() as conn:
+        rows = await db.get_open_enum_states(conn)
+        for r in rows:
+            key = (r["router_sn"], r["equip_type"], r["panel_id"], r["addr"])
+            _active_enum_states[key] = int(r["value"])
+    logger.info("Restored enum states: %d open states", len(_active_enum_states))
 
 
 async def restore_gap_tracker() -> None:
-    """При старте загрузить состояние gap-трекера из БД.
+    """При старте восстановить открытые gap'ы из data_gaps.
 
-    1. last_seen_at из equipment → _last_packet_ts
-    2. Открытые gap'ы (gap_end IS NULL) → _open_gaps
+    _last_packet_ts не восстанавливаем: после рестарта первый пакет
+    инициализирует baseline по device-time. Открытые gap'ы закроются
+    при получении следующего пакета.
     """
     async with db.pool().acquire() as conn:
-        # Восстанавливаем _last_packet_ts из equipment.last_seen_at
-        equip_rows = await db.get_last_packet_times(conn)
-        for r in equip_rows:
-            ekey = (r["router_sn"], r["equip_type"], r["panel_id"])
-            _last_packet_ts[ekey] = r["last_seen_at"]
-
-        # Восстанавливаем _open_gaps
         gap_rows = await db.get_open_gaps(conn)
         for r in gap_rows:
             ekey = (r["router_sn"], r["equip_type"], r["panel_id"])
             _open_gaps[ekey] = True
 
-    logger.info(
-        "Restored gap tracker: %d equipment timestamps, %d open gaps",
-        len(_last_packet_ts), len(_open_gaps),
-    )
+    logger.info("Restored gap tracker: %d open gaps", len(_open_gaps))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,6 +120,19 @@ async def restore_gap_tracker() -> None:
 
 async def dispatch(topic: str, payload_bytes: bytes, cfg: AppConfig) -> None:
     """Главная точка входа: topic + raw payload → обработка."""
+
+    # Register map (retained, обновляется при старте и при изменениях)
+    m_maps = _RE_MAPS.match(topic)
+    if m_maps:
+        device_type = m_maps.group(1)
+        try:
+            data = json.loads(payload_bytes)
+        except json.JSONDecodeError as e:
+            logger.warning("Bad JSON on maps %s: %s", topic, e)
+            return
+        register_map.update(device_type, data)
+        return
+
     m_tel = _RE_TELEMETRY.match(topic)
     if m_tel:
         router_sn = m_tel.group(1)
@@ -255,51 +256,45 @@ async def _check_equipment_gap(
     router_sn: str,
     equip_type: str,
     panel_id: int,
-    now: datetime,
+    ts: datetime,          # device time из payload
 ) -> None:
-    """Проверка gap'а на уровне оборудования (ДО сжатия/фильтрации).
+    """Проверка gap'а на уровне оборудования.
 
-    Логика:
-    - Первый пакет: просто запоминаем ts, gap не детектируем.
-    - Последующие: обновляем EMA среднего интервала.
-      Если elapsed > avg_interval × _GAP_MULTIPLIER → gap.
-    - Если gap был открыт → закрываем (gap_end = now).
-    - Если gap обнаружен → открываем (gap_start = last_packet_ts).
+    Использует device-time (ts) для корректной обработки буферизации:
+    если роутер потерял связь, накопил пакеты и выслал их пачкой,
+    интервалы по device-time будут нормальными — ложного gap'а не будет.
     """
     ekey = (router_sn, equip_type, panel_id)
     prev_ts = _last_packet_ts.get(ekey)
 
     if prev_ts is not None:
-        elapsed = (now - prev_ts).total_seconds()
-        has_open_gap = _open_gaps.get(ekey, False)
+        elapsed = (ts - prev_ts).total_seconds()
 
-        # Вычисляем текущий avg (без обновления — обновим после решения о gap)
+        # Защита от отрицательного elapsed (пакеты пришли не по порядку)
+        if elapsed < 0:
+            _last_packet_ts[ekey] = ts
+            return
+
+        has_open_gap = _open_gaps.get(ekey, False)
         avg = _avg_interval.get(ekey)
 
         if avg is None:
-            # Второй пакет — инициализируем EMA
             _avg_interval[ekey] = elapsed
             avg = elapsed
-            is_gap = False  # Ещё нет статистики для детекции
+            is_gap = False
         else:
-            # Gap detection: elapsed > avg × N
-            # Минимальный порог: 60 сек (чтобы не ловить мелкие задержки)
             threshold = max(avg * _GAP_MULTIPLIER, 60.0)
             is_gap = elapsed > threshold
-
-            # Обновляем EMA только нормальными интервалами (не gap'ами)
             if not is_gap:
                 _avg_interval[ekey] = _EMA_ALPHA * elapsed + (1 - _EMA_ALPHA) * avg
 
         if is_gap and not has_open_gap:
-            # Открываем gap: gap_start = время последнего пакета ДО разрыва
             gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
             logger.info(
                 "GAP opened id=%d %s/%s/%d: elapsed=%.0fs threshold=%.0fs avg=%.0fs",
                 gap_id, router_sn, equip_type, panel_id, elapsed, threshold, avg,
             )
-            # Gap сразу закрывается текущим пакетом (он же — первый после разрыва)
-            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, now)
+            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, ts)
             _open_gaps[ekey] = False
             logger.info(
                 "GAP closed %s/%s/%d: %d gap(s) closed",
@@ -307,16 +302,14 @@ async def _check_equipment_gap(
             )
 
         elif has_open_gap:
-            # Был открытый gap (восстановлен из БД при старте), данные пришли → закрываем
-            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, now)
+            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, ts)
             _open_gaps[ekey] = False
             logger.info(
                 "GAP closed (restored) %s/%s/%d: %d gap(s) closed, elapsed=%.0fs",
                 router_sn, equip_type, panel_id, count, elapsed,
             )
 
-    # Обновляем время последнего пакета
-    _last_packet_ts[ekey] = now
+    _last_packet_ts[ekey] = ts
 
 
 async def _handle_decoded(
@@ -329,7 +322,7 @@ async def _handle_decoded(
 
     ts_str = data.get("timestamp")
     now    = datetime.now(timezone.utc)
-    ts: datetime = now   # fallback: если устройство не присылает ts — используем received_at
+    ts: datetime = now
 
     if ts_str:
         try:
@@ -342,47 +335,49 @@ async def _handle_decoded(
         logger.warning("No registers[] in decoded %s/%d", router_sn, panel_id)
         return
 
-    # Адреса для bulk SELECT (один раз на сообщение)
     addrs: list[int] = sorted({
         int(reg["addr"])
         for reg in registers
         if _safe_int(reg.get("addr")) is not None
     })
 
-    # kpi_map вычисляем один раз на сообщение (fix: было внутри _process_register)
     kpi_map = cfg.history_policy.kpi_map()
 
     # Батчи для записи
-    latest_rows_map: dict[int, tuple] = {}   # addr → tuple (последнее значение)
-    history_batch:   list[tuple] = []        # аналоговые регистры
-    state_batch:     list[tuple] = []        # дискретные / enum
-    parameter_batch: list[tuple] = []        # уставки
-    event_rows:      list[tuple] = []        # события
-    fault_open_batch:  list[tuple] = []      # новые fault-биты
-    fault_close_batch: list[tuple] = []      # закрытые fault-биты
+    latest_rows_map:  dict[int, tuple] = {}
+    history_batch:    list[tuple] = []
+    enum_open_batch:  list[tuple] = []
+    enum_close_batch: list[tuple] = []
+    fault_open_batch:  list[tuple] = []
+    fault_close_batch: list[tuple] = []
+    event_rows:        list[tuple] = []
 
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             await db.upsert_object(conn, router_sn)
             await db.upsert_equipment(conn, router_sn, equip_type, panel_id)
 
-            # Gap detection — ДО обработки регистров (на уровне оборудования)
-            await _check_equipment_gap(conn, router_sn, equip_type, panel_id, now)
+            # Gap detection по device-time
+            await _check_equipment_gap(conn, router_sn, equip_type, panel_id, ts)
 
-            prev_map    = await db.get_latest_state_rows_many(conn, router_sn, equip_type, panel_id, addrs)
-            catalog_map = await db.get_register_catalog_rows_many(conn, equip_type, addrs)
+            prev_map = await db.get_latest_state_rows_many(
+                conn, router_sn, equip_type, panel_id, addrs,
+            )
 
             for reg in registers:
-                # Fault bitmap — специальная обработка вне стандартного роутинга
                 value = reg.get("value")
-                if reg.get("unit") == "fault_bitmap" and isinstance(value, dict):
+
+                # Fault bitmap: value приходит как dict с расшифровкой битов
+                if isinstance(value, dict):
                     addr = _safe_int(reg.get("addr"))
                     if addr is not None:
                         _process_fault_bitmap(
                             router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
                             addr=addr, raw_val=_safe_int(reg.get("raw")),
-                            value_dict=value, ts=ts, now=now,
+                            value_dict=value, ts=ts,
+                            prev_map=prev_map,
                             latest_rows_map=latest_rows_map,
+                            history_batch=history_batch,
                             fault_open_batch=fault_open_batch,
                             fault_close_batch=fault_close_batch,
                             event_rows=event_rows,
@@ -394,11 +389,11 @@ async def _handle_decoded(
                     cfg=cfg, kpi_map=kpi_map,
                     router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
                     reg=reg, ts=ts, now=now,
-                    prev_map=prev_map, catalog_map=catalog_map,
+                    prev_map=prev_map,
                     latest_rows_map=latest_rows_map,
                     history_batch=history_batch,
-                    state_batch=state_batch,
-                    parameter_batch=parameter_batch,
+                    enum_open_batch=enum_open_batch,
+                    enum_close_batch=enum_close_batch,
                     event_rows=event_rows,
                 )
 
@@ -406,10 +401,10 @@ async def _handle_decoded(
                 await db.upsert_latest_state_batch(conn, list(latest_rows_map.values()))
             if history_batch:
                 await db.insert_history_batch(conn, history_batch)
-            if state_batch:
-                await db.insert_state_event_batch(conn, state_batch)
-            if parameter_batch:
-                await db.insert_parameter_history_batch(conn, parameter_batch)
+            if enum_open_batch:
+                await db.open_enum_state_batch(conn, enum_open_batch)
+            if enum_close_batch:
+                await db.close_enum_states_batch(conn, enum_close_batch)
             if fault_open_batch:
                 await db.open_fault_batch(conn, fault_open_batch)
             if fault_close_batch:
@@ -418,10 +413,13 @@ async def _handle_decoded(
                 await db.insert_event_batch(conn, event_rows)
 
     logger.debug(
-        "Decoded %s/%s/%d: %d regs, latest=%d, history=%d, state=%d, param=%d, events=%d",
+        "Decoded %s/%s/%d: %d regs, latest=%d, history=%d, "
+        "enum_open=%d enum_close=%d, fault_open=%d fault_close=%d, events=%d",
         router_sn, equip_type, panel_id, len(registers),
         len(latest_rows_map), len(history_batch),
-        len(state_batch), len(parameter_batch), len(event_rows),
+        len(enum_open_batch), len(enum_close_batch),
+        len(fault_open_batch), len(fault_close_batch),
+        len(event_rows),
     )
 
 
@@ -434,26 +432,23 @@ def _process_fault_bitmap(
     raw_val: int | None,
     value_dict: dict[str, Any],
     ts: datetime,
-    now: datetime,
+    prev_map: dict[int, asyncpg.Record],
     latest_rows_map: dict[int, tuple],
+    history_batch: list[tuple],
     fault_open_batch: list[tuple],
     fault_close_batch: list[tuple],
     event_rows: list[tuple],
     cfg: AppConfig,
 ) -> None:
-    """Обработка регистра с unit='fault_bitmap'.
+    """Обработка fault bitmap регистра.
 
-    - Сравниваем текущие активные биты с кэшем.
-    - Новые биты → fault_open_batch (+ event для любого severity).
-    - Исчезнувшие биты → fault_close_batch.
-    - unknown_bits из декодера игнорируем.
-    - latest_state: value=bitmask (raw), text=JSON активных fault'ов с description.
+    - Открываем/закрываем fault-биты в fault_history.
+    - В history пишем raw (16-бит маска) при изменении.
+    - name/severity живут в cg/v1/maps/<device_type>, не в БД.
+    - В events пишем только {addr, bit}.
     """
-    # Текущие активные биты из сообщения: bit → {name, description, severity}
-    # unknown_bits игнорируем — биты без определения в карте декодера
     faults_list: list[dict] = value_dict.get("faults") or []
-    current: dict[int, dict] = {f["bit"]: f for f in faults_list if "bit" in f}
-    current_bits: set[int] = set(current.keys())
+    current_bits: set[int] = {f["bit"] for f in faults_list if "bit" in f}
 
     fkey = (router_sn, equip_type, panel_id, addr)
     prev_bits: set[int] = _active_fault_bits.get(fkey, set())
@@ -461,51 +456,21 @@ def _process_fault_bitmap(
     appeared = current_bits - prev_bits
     cleared  = prev_bits - current_bits
 
-    # Типы событий по severity
-    _SEVERITY_EVENT_TYPE = {
-        "shutdown":          "fault_shutdown",
-        "shutdown_cooldown": "fault_shutdown_cooldown",
-        "warning":           "fault_warning",
-        "derate":            "fault_derate",
-        "none":              "fault_none",
-        "unknown":           "fault_unknown",
-    }
-
-    # Открываем новые fault'ы
     for bit in appeared:
-        info        = current[bit]
-        fault_name  = info.get("name")
-        description = info.get("description")
-        severity    = info.get("severity")
-        fault_open_batch.append((
-            router_sn, equip_type, panel_id, addr, bit,
-            fault_name, description, severity, ts,
-        ))
-        # Все severity пишем в events
+        fault_open_batch.append((router_sn, equip_type, panel_id, addr, bit, ts))
         if cfg.events_policy.enable_fault_events:
-            event_type = _SEVERITY_EVENT_TYPE.get(severity or "", "fault_unknown")
-            payload_json = json.dumps(
-                {
-                    "addr": addr, "bit": bit,
-                    "fault_name": fault_name,
-                    "description": description,
-                    "severity": severity,
-                },
-                ensure_ascii=False,
-            )
-            label = description or fault_name or f"bit={bit}"
+            payload_json = json.dumps({"addr": addr, "bit": bit}, ensure_ascii=False)
             event_rows.append((
                 router_sn, equip_type, panel_id,
-                event_type,
-                f"addr={addr} bit={bit} {label}",
+                "fault",
+                f"addr={addr} bit={bit}",
                 payload_json,
             ))
         logger.info(
-            "FAULT appeared %s/%s/%d addr=%d bit=%d severity=%s name=%s desc=%s",
-            router_sn, equip_type, panel_id, addr, bit, severity, fault_name, description,
+            "FAULT appeared %s/%s/%d addr=%d bit=%d",
+            router_sn, equip_type, panel_id, addr, bit,
         )
 
-    # Закрываем исчезнувшие fault'ы
     for bit in cleared:
         fault_close_batch.append((router_sn, equip_type, panel_id, addr, bit, ts))
         logger.info(
@@ -513,29 +478,18 @@ def _process_fault_bitmap(
             router_sn, equip_type, panel_id, addr, bit,
         )
 
-    # Обновляем кэш
     _active_fault_bits[fkey] = current_bits
 
-    # latest_state: value = битовая маска, text = JSON активных fault'ов
-    text_val: str | None = None
-    if faults_list:
-        text_val = json.dumps(
-            [
-                {
-                    "bit":         f.get("bit"),
-                    "name":        f.get("name"),
-                    "description": f.get("description"),
-                    "severity":    f.get("severity"),
-                }
-                for f in faults_list
-            ],
-            ensure_ascii=False,
-        )
-    dec_value = Decimal(str(raw_val)) if raw_val is not None else None
-    latest_rows_map[addr] = (
-        router_sn, equip_type, panel_id, addr,
-        ts, dec_value, raw_val, text_val, "fault_bitmap", None, None,
-    )
+    # История raw-значения в history (только при изменении)
+    prev = prev_map.get(addr)
+    prev_raw = prev["raw"] if prev else None
+    dec_raw = Decimal(str(raw_val)) if raw_val is not None else None
+
+    if raw_val != prev_raw:
+        history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_raw, raw_val))
+
+    # latest_state
+    latest_rows_map[addr] = (router_sn, equip_type, panel_id, addr, ts, dec_raw, raw_val)
 
 
 def _process_register(
@@ -549,11 +503,10 @@ def _process_register(
     ts: datetime,
     now: datetime,
     prev_map: dict[int, asyncpg.Record],
-    catalog_map: dict[int, asyncpg.Record],
     latest_rows_map: dict[int, tuple],
     history_batch: list[tuple],
-    state_batch: list[tuple],
-    parameter_batch: list[tuple],
+    enum_open_batch: list[tuple],
+    enum_close_batch: list[tuple],
     event_rows: list[tuple],
 ) -> None:
     try:
@@ -562,102 +515,69 @@ def _process_register(
         logger.warning("Register without addr in %s/%d", router_sn, panel_id)
         return
 
-    value  = reg.get("value")
-    raw_val = _safe_int(reg.get("raw"))
-    text   = reg.get("text")
-    unit   = reg.get("unit")
-    name   = reg.get("name")
-    reason = reg.get("reason")
+    # Пропускаем регистры с ошибкой декодирования
+    if reg.get("reason"):
+        return
 
-    # Преобразуем value в Decimal для numeric column
+    value   = reg.get("value")
+    raw_val = _safe_int(reg.get("raw"))
+
+    # Тип регистра из in-memory map
+    map_unit = register_map.get_unit(equip_type, addr)
+
+    # Конвертируем value в Decimal для numeric column
     dec_value: Decimal | None = None
     if value is not None:
         try:
             dec_value = Decimal(str(value))
         except (InvalidOperation, TypeError, ValueError):
-            if text is None:
-                text = str(value)
+            pass
 
-    prev = prev_map.get(addr)
+    prev       = prev_map.get(addr)
+    prev_value = prev["value"] if prev else None
+    prev_raw   = prev["raw"]   if prev else None
 
-    # Всегда обновляем latest_state (last wins для дублирующихся addr)
-    latest_rows_map[addr] = (
-        router_sn, equip_type, panel_id, addr,
-        ts, dec_value, raw_val, text, unit, name, reason,
-    )
+    # latest_state — обновляем всегда
+    latest_rows_map[addr] = (router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val)
 
-    # Событие: неизвестный регистр
-    if reason and "Неизвестный регистр" in reason:
-        if cfg.events_policy.enable_unknown_register_events:
-            payload_json = json.dumps({"addr": addr, "reason": reason}, ensure_ascii=False)
-            event_rows.append((
-                router_sn, equip_type, panel_id,
-                "unknown_register",
-                f"addr={addr} reason={reason}",
-                payload_json,
-            ))
-
-    # Параметры записи из catalog / kpi / defaults
-    # mqtt_unit передаём для автоопределения типа когда регистр не в catalog:
-    #   unit=None → enum (state_events), unit задан → analog (history)
-    catalog_row = catalog_map.get(addr)
-    params = resolve_params(cfg, equip_type, addr, catalog_row, kpi_map, mqtt_unit=unit)
-    key = (router_sn, equip_type, panel_id, addr)
+    params = resolve_params(cfg, equip_type, addr, map_unit, kpi_map)
+    key    = (router_sn, equip_type, panel_id, addr)
     last_ts = _last_write_ts.get(key)
 
-    prev_value  = prev["value"]  if prev else None
-    prev_raw    = prev["raw"]    if prev else None
-    prev_text   = prev["text"]   if prev else None
-    prev_reason = prev["reason"] if prev else None
-
-    # ── Роутинг по register_kind ──────────────────────────────────────────
-
-    if params.register_kind == "parameter":
-        # Параметры: только изменение, без heartbeat
+    if params.register_kind == "enum":
+        # ── Enum: только change, без heartbeat ───────────────────────────
         decision = should_write(
             params,
-            new_value=dec_value, new_raw=raw_val, new_text=text, new_reason=reason,
-            prev_value=prev_value, prev_raw=prev_raw, prev_text=prev_text, prev_reason=prev_reason,
+            new_value=dec_value, new_raw=raw_val,
+            prev_value=prev_value, prev_raw=prev_raw,
             last_write_ts=last_ts, now=now,
             use_heartbeat=False,
         )
         if decision.write:
-            parameter_batch.append((
-                router_sn, equip_type, panel_id, addr, ts,
-                dec_value, raw_val, text,
-            ))
+            history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
             _update_last_write_ts(key, now)
 
-    elif params.register_kind in ("discrete", "enum"):
-        # Состояния: только изменение — gap detection на уровне оборудования (data_gaps)
-        decision = should_write(
-            params,
-            new_value=dec_value, new_raw=raw_val, new_text=text, new_reason=reason,
-            prev_value=prev_value, prev_raw=prev_raw, prev_text=prev_text, prev_reason=prev_reason,
-            last_write_ts=last_ts, now=now,
-            use_heartbeat=False,
-        )
-        if decision.write:
-            state_batch.append((
-                router_sn, equip_type, panel_id, addr, ts,
-                raw_val, text, decision.write_reason,
-            ))
-            _update_last_write_ts(key, now)
+        # enum_history: открываем/закрываем периоды состояния
+        ekey = (router_sn, equip_type, panel_id, addr)
+        prev_enum_val = _active_enum_states.get(ekey)
+        if raw_val != prev_enum_val:
+            if prev_enum_val is not None:
+                enum_close_batch.append((router_sn, equip_type, panel_id, addr, ts))
+            if raw_val is not None:
+                enum_open_batch.append((router_sn, equip_type, panel_id, addr, raw_val, ts))
+            _active_enum_states[ekey] = raw_val
 
     else:
-        # Аналог (default): change + heartbeat → TimescaleDB hypertable
+        # ── Аналог (default): change + tolerance + heartbeat ─────────────
         decision = should_write(
             params,
-            new_value=dec_value, new_raw=raw_val, new_text=text, new_reason=reason,
-            prev_value=prev_value, prev_raw=prev_raw, prev_text=prev_text, prev_reason=prev_reason,
+            new_value=dec_value, new_raw=raw_val,
+            prev_value=prev_value, prev_raw=prev_raw,
             last_write_ts=last_ts, now=now,
             use_heartbeat=True,
         )
         if decision.write:
-            history_batch.append((
-                router_sn, equip_type, panel_id, addr, ts,
-                dec_value, raw_val, text, reason, decision.write_reason,
-            ))
+            history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
             _update_last_write_ts(key, now)
 
 

@@ -1,9 +1,20 @@
-"""CG DB-Writer v2.1.0 — логика решения «писать ли в history / state_events»."""
+"""CG DB-Writer — логика решения «писать ли в history».
+
+Тип регистра определяется из in-memory register map (cg/v1/maps/+),
+а не из register_catalog БД.
+
+Routing:
+  analog      → history, change + tolerance + heartbeat
+  enum        → history, только change (без heartbeat)
+  fault_bitmap → history (raw), только change; fault_history — отдельно
+  unknown     → analog (defaults)
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from src.config import AppConfig
@@ -12,81 +23,57 @@ from src.config import AppConfig
 @dataclass
 class _RegParams:
     """Эффективные параметры для конкретного регистра."""
-    tolerance: float | None
+    tolerance:       float | None
     min_interval_sec: int
-    heartbeat_sec: int
-    store_history: bool
-    value_kind: str    # analog | discrete | enum | parameter | …
-    register_kind: str # analog | discrete | enum | parameter
+    heartbeat_sec:   int
+    store_history:   bool
+    register_kind:   str   # analog | enum | fault_bitmap
 
 
 def resolve_params(
     cfg: AppConfig,
     equip_type: str,
     addr: int,
-    catalog_row: Any | None,
+    map_unit: str | None,
     kpi_map: dict[tuple[str, int], Any],
-    mqtt_unit: str | None = None,
 ) -> _RegParams:
-    """Определить параметры для addr: catalog → kpi → defaults.
+    """Определить параметры записи для регистра.
 
-    mqtt_unit — значение поля 'unit' из пакета декодера.
-    Используется как fallback для определения register_kind когда
-    регистр отсутствует в register_catalog:
-      - unit is None  → enum (state_events)
-      - unit не None  → analog (history)
+    map_unit — значение поля 'unit' из in-memory register map.
+    Если None (регистр не в карте) — считаем аналогом.
 
     kpi_map передаётся снаружи (вычислен один раз на сообщение).
     """
     d = cfg.history_policy.defaults
 
-    tolerance    = d.tolerance_analog
-    min_interval = d.min_interval_sec
-    heartbeat    = d.heartbeat_sec
-    store        = d.store_history
-    vk           = d.value_kind
+    tolerance     = d.tolerance_analog
+    min_interval  = d.min_interval_sec
+    heartbeat     = d.heartbeat_sec
+    store         = d.store_history
 
-    # Если регистр не в catalog — тип определяем по unit из декодера:
-    #   unit == None → enum/discrete (state_events)
-    #   unit задан   → analog (history)
-    if catalog_row is None:
-        rk = "enum" if mqtt_unit is None else "analog"
-        if rk == "enum":
-            vk = "enum"
-            tolerance = None
+    # Тип регистра по unit из map
+    if map_unit == "enum":
+        register_kind = "enum"
+        tolerance     = None   # для enum tolerance не применяется
+    elif map_unit == "fault_bitmap":
+        register_kind = "fault_bitmap"
+        tolerance     = None
     else:
-        rk = "analog"
+        register_kind = "analog"
 
-    # Перекрываем из register_catalog (всегда имеет приоритет)
-    if catalog_row is not None:
-        if catalog_row["tolerance"] is not None:
-            tolerance = float(catalog_row["tolerance"])
-        if catalog_row["min_interval_sec"] is not None:
-            min_interval = int(catalog_row["min_interval_sec"])
-        if catalog_row["heartbeat_sec"] is not None:
-            heartbeat = int(catalog_row["heartbeat_sec"])
-        store = bool(catalog_row["store_history"])
-        vk    = catalog_row["value_kind"] or vk
-        rk    = catalog_row["register_kind"] or rk
-
-    # Перекрываем из kpi_registers
+    # KPI-регистры перекрывают defaults
     kpi = kpi_map.get((equip_type, addr))
     if kpi is not None:
         min_interval = kpi.min_interval_sec
         heartbeat    = kpi.heartbeat_sec
         tolerance    = kpi.tolerance
 
-    # Для дискретных/enum/text — tolerance не применяется
-    if vk in ("discrete", "enum", "text"):
-        tolerance = None
-
     return _RegParams(
         tolerance=tolerance,
         min_interval_sec=min_interval,
         heartbeat_sec=heartbeat,
         store_history=store,
-        value_kind=vk,
-        register_kind=rk,
+        register_kind=register_kind,
     )
 
 
@@ -99,24 +86,19 @@ class WriteDecision:
 def should_write(
     params: _RegParams,
     *,
-    new_value: Any,
+    new_value: Decimal | None,
     new_raw: int | None,
-    new_text: str | None,
-    new_reason: str | None,
-    prev_value: Any,
+    prev_value: Decimal | None,
     prev_raw: int | None,
-    prev_text: str | None,
-    prev_reason: str | None,
     last_write_ts: datetime | None,
     now: datetime,
     use_heartbeat: bool = True,
 ) -> WriteDecision:
-    """Решает, нужно ли писать запись.
+    """Решает, нужно ли писать запись в history.
 
-    Используется для:
-      - аналоговых регистров (history):          use_heartbeat=True
-      - дискретных/enum регистров (state_events): use_heartbeat=True
-      - параметров (parameter_history):           use_heartbeat=False
+    analog:       use_heartbeat=True  (change + tolerance + heartbeat)
+    enum:         use_heartbeat=False (только change)
+    fault_bitmap: use_heartbeat=False (только change по raw)
     """
     if not params.store_history:
         return WriteDecision(False)
@@ -129,15 +111,10 @@ def should_write(
     if elapsed is not None and elapsed < params.min_interval_sec:
         return WriteDecision(False)
 
-    # Детектирование изменения
-    changed = False
-    if new_raw != prev_raw:
-        changed = True
-    if new_text != prev_text:
-        changed = True
-    if new_reason != prev_reason:
-        changed = True
+    # Детектирование изменения по raw (точный целочисленный сигнал)
+    changed = new_raw != prev_raw
 
+    # Для аналогов — дополнительно проверяем tolerance по float-значению
     if not changed and params.tolerance is not None:
         try:
             nv = float(new_value) if new_value is not None else None
@@ -153,7 +130,7 @@ def should_write(
     if changed:
         return WriteDecision(True, "change")
 
-    # Heartbeat — запись для детекции gap'ов
+    # Heartbeat — только для аналогов, для непрерывности графика
     if use_heartbeat and (elapsed is None or elapsed >= params.heartbeat_sec):
         return WriteDecision(True, "heartbeat")
 

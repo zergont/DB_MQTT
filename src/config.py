@@ -32,6 +32,7 @@ class MqttCfg:
 
     sub_decoded:   str = "cg/v1/decoded/SN/+/+/+"
     sub_telemetry: str = "cg/v1/telemetry/SN/+"
+    sub_maps:      str = "cg/v1/maps/+"
 
 
 @dataclass
@@ -180,6 +181,8 @@ def _parse_mqtt(raw: dict[str, Any] | None) -> MqttCfg:
         cfg.sub_decoded = subs["decoded"]
     if "telemetry" in subs:
         cfg.sub_telemetry = subs["telemetry"]
+    if "maps" in subs:
+        cfg.sub_maps = subs["maps"]
     return cfg
 
 
@@ -220,8 +223,9 @@ def config_to_dict(cfg: AppConfig) -> dict[str, Any]:
     # MQTT: вернуть subscriptions в вложенную структуру
     mqtt = d.get("mqtt", {})
     mqtt["subscriptions"] = {
-        "decoded": mqtt.pop("sub_decoded", ""),
+        "decoded":   mqtt.pop("sub_decoded", ""),
         "telemetry": mqtt.pop("sub_telemetry", ""),
+        "maps":      mqtt.pop("sub_maps", ""),
     }
     return d
 

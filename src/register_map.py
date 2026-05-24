@@ -1,0 +1,74 @@
+"""CG DB-Writer — in-memory register map из cg/v1/maps/+ MQTT-топика.
+
+Топик retained, публикуется telemetry2 при старте один раз на device_type.
+db_writer подписывается на cg/v1/maps/+ и хранит карту в памяти.
+Карта используется вместо DB-запросов к register_catalog при обработке
+decoded-сообщений.
+
+Формат топика: cg/v1/maps/<device_type>
+Формат payload:
+{
+  "device_type": "pcc",
+  "registers": {
+    "40736": {"name": "...", "unit": "kPa", "notes_ru": "..."},
+    "40010": {"name": "...", "unit": "enum", "labels": {...}},
+    "40400": {"name": "...", "unit": "fault_bitmap", "bits": {
+        "0": {"name": "LowOilPressureShutdown", "severity": "shutdown"},
+        ...
+    }}
+  }
+}
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+logger = logging.getLogger("cg.register_map")
+
+# device_type → {addr(int) → {unit, bits, labels, ...}}
+_maps: dict[str, dict[int, dict[str, Any]]] = {}
+
+
+def update(device_type: str, payload: dict[str, Any]) -> None:
+    """Обновить карту из распарсенного payload cg/v1/maps/<device_type>."""
+    registers_raw = payload.get("registers") or {}
+    registers: dict[int, dict[str, Any]] = {}
+    for addr_str, meta in registers_raw.items():
+        try:
+            addr = int(addr_str)
+        except (ValueError, TypeError):
+            logger.warning("register_map: bad addr key %r in %s", addr_str, device_type)
+            continue
+        registers[addr] = meta
+
+    _maps[device_type] = registers
+    logger.info(
+        "Register map updated: device_type=%s registers=%d",
+        device_type, len(registers),
+    )
+
+
+def get_unit(equip_type: str, addr: int) -> str | None:
+    """Вернуть unit для регистра или None если регистр не в карте."""
+    m = _maps.get(equip_type)
+    if m is None:
+        return None
+    entry = m.get(addr)
+    if entry is None:
+        return None
+    return entry.get("unit")
+
+
+def get_entry(equip_type: str, addr: int) -> dict[str, Any] | None:
+    """Вернуть полную запись карты для регистра или None."""
+    m = _maps.get(equip_type)
+    if m is None:
+        return None
+    return m.get(addr)
+
+
+def is_loaded(equip_type: str) -> bool:
+    """True если карта для device_type уже получена."""
+    return equip_type in _maps
