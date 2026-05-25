@@ -210,12 +210,14 @@ GROUP BY 1, 2, 3, 4, 5
 WITH NO DATA;
 
 -- Обновлять каждую минуту; start_offset=60min учитывает позднее прибытие данных
+-- Позиционные параметры: aggregate, start_offset, end_offset, schedule_interval, if_not_exists
+-- (named syntax start_offset => ... не работает на PG16 — OFFSET зарезервировано)
 SELECT add_continuous_aggregate_policy(
     'history_1min',
-    start_offset      => INTERVAL '60 minutes',
-    end_offset        => INTERVAL '1 minute',
-    schedule_interval => INTERVAL '1 minute',
-    if_not_exists     => true
+    INTERVAL '60 minutes',
+    INTERVAL '1 minute',
+    INTERVAL '1 minute',
+    true
 );
 
 -- Иерархический CA: history_1hour строится поверх history_1min
@@ -242,10 +244,10 @@ WITH NO DATA;
 
 SELECT add_continuous_aggregate_policy(
     'history_1hour',
-    start_offset      => INTERVAL '3 hours',
-    end_offset        => INTERVAL '1 hour',
-    schedule_interval => INTERVAL '1 hour',
-    if_not_exists     => true
+    INTERVAL '3 hours',
+    INTERVAL '1 hour',
+    INTERVAL '1 hour',
+    true
 );
 
 
