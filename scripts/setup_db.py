@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CG DB-Writer v2.2.1 — подготовка PostgreSQL/TimescaleDB.
+"""CG DB-Writer v2.5.0 — подготовка PostgreSQL/TimescaleDB.
 
 Использование:
   python scripts/setup_db.py --config config.yml [--su-user postgres] [--su-password XXX] [--drop]
@@ -40,6 +40,7 @@ EXPECTED_TABLES = [
     "parameter_history",
     "events",
     "data_gaps",
+    "enum_history",
     "fault_history",
     "share_links",
 ]
@@ -145,8 +146,8 @@ async def setup(cfg, su_user: str, su_password: str, drop: bool) -> None:
             for tbl in (
                 "history", "gps_raw_history", "gps_latest_filtered",
                 "latest_state", "state_events", "parameter_history",
-                "events", "data_gaps", "fault_history", "share_links",
-                "equipment", "register_catalog", "objects",
+                "events", "data_gaps", "enum_history", "fault_history",
+                "share_links", "equipment", "register_catalog", "objects",
             ):
                 await su_conn.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
             print("Done.")
@@ -215,7 +216,7 @@ async def setup(cfg, su_user: str, su_password: str, drop: bool) -> None:
         print(f"  history_1min:     {ret.history_1min_days} days")
         print(f"  history_1hour:    {ret.history_1hour_years} years")
 
-        print("\nDone! CG DB-Writer v2.2.1 schema is ready.")
+        print("\nDone! CG DB-Writer v2.5.0 schema is ready.")
 
     finally:
         await su_conn.close()
@@ -242,7 +243,7 @@ async def _ensure_role(conn, rolname: str, password: str) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="CG DB-Writer v2.2.1 — setup database")
+    p = argparse.ArgumentParser(description="CG DB-Writer v2.5.0 — setup database")
     p.add_argument("-c", "--config", default="config.yml", help="Path to config.yml")
     p.add_argument("--su-user", default="postgres",
                    help="PostgreSQL superuser for schema setup (default: postgres)")
