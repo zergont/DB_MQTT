@@ -512,11 +512,12 @@ BEGIN
             ON objects, equipment, register_catalog,
                gps_raw_history, gps_latest_filtered,
                latest_state, history,
-               state_events, parameter_history, events, data_gaps
+               state_events, parameter_history, events, data_gaps,
+               fault_history, enum_history
             TO cg_writer;
         GRANT USAGE ON SEQUENCE
             state_events_id_seq, parameter_history_id_seq, events_id_seq,
-            data_gaps_id_seq
+            data_gaps_id_seq, fault_history_id_seq, enum_history_id_seq
             TO cg_writer;
     END IF;
 END
