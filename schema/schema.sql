@@ -235,9 +235,6 @@ SELECT
     sum(avg_value * sample_count) / NULLIF(sum(sample_count), 0)    AS avg_value,
     min(min_value)                                                   AS min_value,
     max(max_value)                                                   AS max_value,
-    -- Open/close: первый open первой минуты = open часа; last close = close часа
-    first(open_value,  ts)                                           AS open_value,
-    last(close_value,  ts)                                           AS close_value,
     sum(sample_count)                                                AS sample_count
 FROM history_1min
 GROUP BY 1, 2, 3, 4, 5
