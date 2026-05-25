@@ -500,6 +500,9 @@ BEGIN
         GRANT DELETE ON objects, equipment, latest_state,
                         history, state_events, events,
                         gps_latest_filtered, data_gaps TO cg_ui;
+        -- share_links: полное управление ссылками
+        GRANT INSERT, UPDATE, DELETE ON share_links TO cg_ui;
+        GRANT USAGE ON SEQUENCE share_links_id_seq TO cg_ui;
     END IF;
 END
 $$;
