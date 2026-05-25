@@ -495,8 +495,7 @@ DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'cg_ui') THEN
         GRANT SELECT ON ALL TABLES IN SCHEMA public TO cg_ui;
-        GRANT UPDATE (name, notes) ON objects TO cg_ui;
-        GRANT UPDATE (name) ON equipment TO cg_ui;
+        GRANT UPDATE ON objects, equipment TO cg_ui;
         GRANT DELETE ON objects, equipment, latest_state,
                         history, state_events, events,
                         gps_latest_filtered, data_gaps TO cg_ui;
