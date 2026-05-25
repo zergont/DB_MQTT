@@ -209,9 +209,7 @@ FROM history
 GROUP BY 1, 2, 3, 4, 5
 WITH NO DATA;
 
--- Обновлять каждую минуту; start_offset=60min учитывает позднее прибытие данных
--- Позиционные параметры: aggregate, start_offset, end_offset, schedule_interval, if_not_exists
--- (named syntax start_offset => ... не работает на PG16 — OFFSET зарезервировано)
+-- Обновлять каждую минуту (start_offset=60min учитывает позднее прибытие данных)
 SELECT add_continuous_aggregate_policy(
     'history_1min',
     INTERVAL '60 minutes',
