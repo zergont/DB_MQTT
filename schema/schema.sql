@@ -500,9 +500,11 @@ BEGIN
         GRANT DELETE ON objects, equipment, latest_state,
                         history, state_events, events,
                         gps_latest_filtered, data_gaps TO cg_ui;
-        -- share_links: полное управление ссылками
-        GRANT INSERT, UPDATE, DELETE ON share_links TO cg_ui;
+        -- share_links: полное управление ссылками (явно, т.к. ALL TABLES может не покрывать)
+        GRANT SELECT, INSERT, UPDATE, DELETE ON share_links TO cg_ui;
         GRANT USAGE ON SEQUENCE share_links_id_seq TO cg_ui;
+        -- fault_history, enum_history: явный SELECT (ALL TABLES иногда не применяется к новым таблицам)
+        GRANT SELECT ON fault_history, enum_history TO cg_ui;
     END IF;
 END
 $$;
