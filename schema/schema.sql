@@ -51,24 +51,31 @@ ALTER TABLE equipment ADD COLUMN IF NOT EXISTS model        TEXT;
 ALTER TABLE equipment ADD COLUMN IF NOT EXISTS engine_sn    TEXT;
 
 -- register_kind:
---   analog    — измерение (ток, напряжение, мощность) → history + CA агрегация
---   discrete  — бинарное состояние (вкл/выкл, авария) → state_events
---   enum      — перечислимое состояние (AUTO/MANUAL)   → state_events
---   parameter — уставка / настройка (редко меняется)   → parameter_history
+--   analog       — измерение (ток, напряжение, мощность) → history + CA агрегация
+--   enum         — перечислимое состояние (AUTO/MANUAL)   → history + enum_history
+--   fault_bitmap — битовая маска аварий                   → history + fault_history
+--   discrete     — бинарное состояние (вкл/выкл)         → state_events
+--   parameter    — уставка / настройка (редко меняется)   → parameter_history
+--
+-- states_json:
+--   enum         → {"0": "AUTO", "1": "MANUAL", ...}        (из поля labels в map)
+--   fault_bitmap → {"0": {"name": "...", "severity": "..."}} (из поля bits в map)
 CREATE TABLE IF NOT EXISTS register_catalog (
     equip_type       TEXT        NOT NULL,
     addr             INT         NOT NULL,
     name_default     TEXT,
     unit_default     TEXT,
     register_kind    TEXT        NOT NULL DEFAULT 'analog'
-                     CHECK (register_kind IN ('analog', 'discrete', 'enum', 'parameter')),
-    value_kind       TEXT        NOT NULL DEFAULT 'analog',
-    tolerance        NUMERIC,
-    min_interval_sec INT,
-    heartbeat_sec    INT,
-    store_history    BOOL        NOT NULL DEFAULT true,
+                     CHECK (register_kind IN ('analog', 'discrete', 'enum', 'parameter', 'fault_bitmap')),
+    states_json      JSONB,
     PRIMARY KEY (equip_type, addr)
 );
+
+-- Миграция для существующих установок
+ALTER TABLE register_catalog ADD COLUMN IF NOT EXISTS states_json JSONB;
+ALTER TABLE register_catalog DROP CONSTRAINT IF EXISTS register_catalog_register_kind_check;
+ALTER TABLE register_catalog ADD CONSTRAINT register_catalog_register_kind_check
+    CHECK (register_kind IN ('analog', 'discrete', 'enum', 'parameter', 'fault_bitmap'));
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -487,7 +494,35 @@ CREATE TABLE IF NOT EXISTS share_links (
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 11. Права доступа
+-- 11. Обогащённое представление history
+--
+--     history_rich = history LEFT JOIN register_catalog
+--     Потребители получают данные + метаданные регистра одним запросом.
+--     LEFT JOIN гарантирует: данные не теряются даже если регистр не в каталоге.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE OR REPLACE VIEW history_rich AS
+SELECT
+    h.router_sn,
+    h.equip_type,
+    h.panel_id,
+    h.addr,
+    h.ts,
+    h.received_at,
+    h.value,
+    h.raw,
+    r.name_default   AS name,
+    r.unit_default   AS unit,
+    r.register_kind,
+    r.states_json
+FROM history h
+LEFT JOIN register_catalog r
+    ON r.equip_type = h.equip_type
+    AND r.addr      = h.addr;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 12. Права доступа
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- cg_ui: чтение всего + запись имён объектов
@@ -504,6 +539,8 @@ BEGIN
         GRANT USAGE ON SEQUENCE share_links_id_seq TO cg_ui;
         -- fault_history, enum_history: явный SELECT (ALL TABLES иногда не применяется к новым таблицам)
         GRANT SELECT ON fault_history, enum_history TO cg_ui;
+        -- history_rich: VIEW с обогащёнными данными
+        GRANT SELECT ON history_rich TO cg_ui;
     END IF;
 END
 $$;

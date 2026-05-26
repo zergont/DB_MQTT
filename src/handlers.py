@@ -131,6 +131,8 @@ async def dispatch(topic: str, payload_bytes: bytes, cfg: AppConfig) -> None:
             logger.warning("Bad JSON on maps %s: %s", topic, e)
             return
         register_map.update(device_type, data)
+        async with db.pool().acquire() as conn:
+            await register_map.sync_to_db(conn, device_type)
         return
 
     m_tel = _RE_TELEMETRY.match(topic)
