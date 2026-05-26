@@ -8,8 +8,9 @@
 --   TimescaleDB 2.9+ (для иерархических Continuous Aggregates)
 --
 -- Роли БД (создаются setup_db.py):
---   cg_writer — DB-Writer (INSERT/SELECT)
---   cg_ui     — UI backend (SELECT)
+--   cg_writer   — DB-Writer (INSERT/SELECT)
+--   cg_ui       — UI backend (SELECT + управление объектами)
+--   cg_analytics — аналитика (SELECT only, все таблицы)
 -- =============================================================================
 
 
@@ -522,6 +523,17 @@ BEGIN
         GRANT SELECT ON fault_history, enum_history TO cg_ui;
         -- history_rich: VIEW с обогащёнными данными
         GRANT SELECT ON history_rich TO cg_ui;
+    END IF;
+END
+$$;
+
+-- cg_analytics: только чтение всех данных (аналитика)
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'cg_analytics') THEN
+        GRANT SELECT ON ALL TABLES IN SCHEMA public TO cg_analytics;
+        GRANT SELECT ON history_rich TO cg_analytics;
+        GRANT SELECT ON fault_history, enum_history TO cg_analytics;
     END IF;
 END
 $$;

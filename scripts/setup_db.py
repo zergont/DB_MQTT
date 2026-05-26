@@ -178,6 +178,7 @@ async def setup(cfg, su_user: str, su_password: str, drop: bool) -> None:
         # ── Роли ──────────────────────────────────────────────────────────────
         await _ensure_role(su_conn, "cg_writer", pg.password)
         await _ensure_role(su_conn, "cg_ui", "cg_ui_pass")
+        await _ensure_role(su_conn, "cg_analytics", "cg_analytics_pass")
 
         # ── Верификация таблиц ────────────────────────────────────────────────
         print("\nVerifying tables…")
