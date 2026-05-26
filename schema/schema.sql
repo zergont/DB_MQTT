@@ -58,8 +58,10 @@ ALTER TABLE equipment ADD COLUMN IF NOT EXISTS engine_sn    TEXT;
 --   parameter    — уставка / настройка (редко меняется)   → parameter_history
 --
 -- states_json:
---   enum         → {"0": "AUTO", "1": "MANUAL", ...}        (из поля labels в map)
---   fault_bitmap → {"0": {"name": "...", "severity": "..."}} (из поля bits в map)
+--   enum         → {"labels":    {"0": "Auto",  "1": "Manual"},
+--                   "labels_ru": {"0": "Авто",  "1": "Ручной"}}  (labels_ru опционально)
+--   fault_bitmap → {"0": {"name": "...", "name_ru": "...", "severity": "..."}}
+--                  (из bits в map; name_ru опционально — только где есть перевод)
 CREATE TABLE IF NOT EXISTS register_catalog (
     equip_type       TEXT        NOT NULL,
     addr             INT         NOT NULL,

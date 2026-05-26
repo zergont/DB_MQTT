@@ -93,10 +93,14 @@ async def sync_to_db(conn: "asyncpg.Connection", equip_type: str) -> None:
         unit = entry.get("unit") or ""
         if unit == "fault_bitmap":
             kind = "fault_bitmap"
-            states = entry.get("bits")
+            states = entry.get("bits")          # {"0": {"name": ..., "name_ru": ..., "severity": ...}}
         elif unit == "enum":
             kind = "enum"
-            states = entry.get("labels")
+            labels    = entry.get("labels")     # {"0": "Off", "1": "Auto"}
+            labels_ru = entry.get("labels_ru")  # {"0": "Выкл", "1": "Авто"} — опционально
+            states = {"labels": labels}
+            if labels_ru:
+                states["labels_ru"] = labels_ru
         else:
             kind = "analog"
             states = None
