@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 
 from src import db, register_map
-from src.config import AppConfig
+from src.config import AppConfig, GapDetectorCfg
 from src.gps_filter import GpsFilter, GpsPoint, GpsVerdict, haversine_m
 from src.history_policy import WriteDecision, resolve_params, should_write
 
@@ -29,10 +29,8 @@ _WRITE_TS_CACHE_WARN = 100_000
 # Трекер на уровне оборудования (router_sn, equip_type, panel_id).
 # Использует device-time (ts из payload) для корректной обработки буферизации.
 
-_GAP_MULTIPLIER = 5
 _last_packet_ts: dict[tuple[str, str, int], datetime] = {}
 _avg_interval:   dict[tuple[str, str, int], float] = {}
-_EMA_ALPHA = 0.1
 
 # Трекер открытых gap'ов
 _open_gaps: dict[tuple[str, str, int], bool] = {}
@@ -259,6 +257,7 @@ async def _check_equipment_gap(
     equip_type: str,
     panel_id: int,
     ts: datetime,          # device time из payload
+    gap_cfg: GapDetectorCfg,
 ) -> None:
     """Проверка gap'а на уровне оборудования.
 
@@ -285,10 +284,10 @@ async def _check_equipment_gap(
             avg = elapsed
             is_gap = False
         else:
-            threshold = max(avg * _GAP_MULTIPLIER, 60.0)
+            threshold = max(avg * gap_cfg.multiplier, float(gap_cfg.min_threshold_sec))
             is_gap = elapsed > threshold
             if not is_gap:
-                _avg_interval[ekey] = _EMA_ALPHA * elapsed + (1 - _EMA_ALPHA) * avg
+                _avg_interval[ekey] = gap_cfg.ema_alpha * elapsed + (1 - gap_cfg.ema_alpha) * avg
 
         if is_gap and not has_open_gap:
             gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
@@ -360,7 +359,7 @@ async def _handle_decoded(
             await db.upsert_equipment(conn, router_sn, equip_type, panel_id)
 
             # Gap detection по device-time
-            await _check_equipment_gap(conn, router_sn, equip_type, panel_id, ts)
+            await _check_equipment_gap(conn, router_sn, equip_type, panel_id, ts, cfg.gap_detector)
 
             prev_map = await db.get_latest_state_rows_many(
                 conn, router_sn, equip_type, panel_id, addrs,

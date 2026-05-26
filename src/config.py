@@ -114,6 +114,13 @@ class EventsPolicyCfg:
 
 
 @dataclass
+class GapDetectorCfg:
+    multiplier: int = 5
+    ema_alpha: float = 0.1
+    min_threshold_sec: int = 60
+
+
+@dataclass
 class RetentionCfg:
     """Информационные параметры retention — используются setup_db.py
     при создании TimescaleDB retention policies.
@@ -154,6 +161,7 @@ class AppConfig:
     gps_filter:     GpsFilterCfg     = field(default_factory=GpsFilterCfg)
     history_policy: HistoryPolicyCfg = field(default_factory=HistoryPolicyCfg)
     events_policy:  EventsPolicyCfg  = field(default_factory=EventsPolicyCfg)
+    gap_detector:   GapDetectorCfg   = field(default_factory=GapDetectorCfg)
     retention:      RetentionCfg     = field(default_factory=RetentionCfg)
     logging:        LoggingCfg       = field(default_factory=LoggingCfg)
     health:         HealthCfg        = field(default_factory=HealthCfg)
@@ -207,6 +215,7 @@ def parse_config_dict(raw: dict[str, Any]) -> AppConfig:
         gps_filter=_merge(GpsFilterCfg, raw.get("gps_filter")),
         history_policy=_parse_history(raw.get("history_policy")),
         events_policy=_merge(EventsPolicyCfg, raw.get("events_policy")),
+        gap_detector=_merge(GapDetectorCfg, raw.get("gap_detector")),
         retention=_merge(RetentionCfg, raw.get("retention")),
         logging=_merge(LoggingCfg, raw.get("logging")),
         health=_merge(HealthCfg, raw.get("health")),

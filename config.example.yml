@@ -98,6 +98,12 @@ events_policy:
   enable_unknown_register_events: true
   enable_fault_events: true         # shutdown fault → дополнительно в events
 
+# ---------- Gap detector (детектор пропусков связи) -------------------------
+gap_detector:
+  multiplier: 5              # порог = avg_interval × multiplier
+  ema_alpha: 0.1             # коэффициент сглаживания EMA (0.01…1.0)
+  min_threshold_sec: 60      # минимальный порог gap (сек), независимо от avg
+
 # ---------- Retention (очистка) — только информационно ----------------------
 # TimescaleDB Retention Policies устанавливаются в schema.sql через setup_db.py.
 # Изменение значений здесь НЕ влияет на уже запущенные политики в БД.
