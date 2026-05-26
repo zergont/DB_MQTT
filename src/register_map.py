@@ -106,6 +106,7 @@ async def sync_to_db(conn: "asyncpg.Connection", equip_type: str) -> None:
             equip_type,
             addr,
             entry.get("name"),
+            entry.get("notes_ru") or None,
             unit or None,
             kind,
             states_json,
@@ -114,10 +115,11 @@ async def sync_to_db(conn: "asyncpg.Connection", equip_type: str) -> None:
     await conn.executemany(
         """
         INSERT INTO register_catalog
-          (equip_type, addr, name_default, unit_default, register_kind, states_json)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+          (equip_type, addr, name_default, name_ru, unit_default, register_kind, states_json)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
         ON CONFLICT (equip_type, addr) DO UPDATE SET
           name_default  = EXCLUDED.name_default,
+          name_ru       = EXCLUDED.name_ru,
           unit_default  = EXCLUDED.unit_default,
           register_kind = EXCLUDED.register_kind,
           states_json   = EXCLUDED.states_json

@@ -63,7 +63,8 @@ ALTER TABLE equipment ADD COLUMN IF NOT EXISTS engine_sn    TEXT;
 CREATE TABLE IF NOT EXISTS register_catalog (
     equip_type       TEXT        NOT NULL,
     addr             INT         NOT NULL,
-    name_default     TEXT,
+    name_default     TEXT,                  -- имя из map (обычно English)
+    name_ru          TEXT,                  -- перевод из map.notes_ru
     unit_default     TEXT,
     register_kind    TEXT        NOT NULL DEFAULT 'analog'
                      CHECK (register_kind IN ('analog', 'discrete', 'enum', 'parameter', 'fault_bitmap')),
@@ -73,6 +74,7 @@ CREATE TABLE IF NOT EXISTS register_catalog (
 
 -- Миграция для существующих установок
 ALTER TABLE register_catalog ADD COLUMN IF NOT EXISTS states_json JSONB;
+ALTER TABLE register_catalog ADD COLUMN IF NOT EXISTS name_ru TEXT;
 ALTER TABLE register_catalog DROP CONSTRAINT IF EXISTS register_catalog_register_kind_check;
 ALTER TABLE register_catalog ADD CONSTRAINT register_catalog_register_kind_check
     CHECK (register_kind IN ('analog', 'discrete', 'enum', 'parameter', 'fault_bitmap'));
@@ -512,6 +514,7 @@ SELECT
     h.value,
     h.raw,
     r.name_default   AS name,
+    r.name_ru,
     r.unit_default   AS unit,
     r.register_kind,
     r.states_json
