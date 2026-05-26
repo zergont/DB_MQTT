@@ -54,7 +54,7 @@ ALTER TABLE equipment ADD COLUMN IF NOT EXISTS engine_sn    TEXT;
 --   analog       — измерение (ток, напряжение, мощность) → history + CA агрегация
 --   enum         — перечислимое состояние (AUTO/MANUAL)   → history + enum_history
 --   fault_bitmap — битовая маска аварий                   → history + fault_history
---   discrete     — бинарное состояние (вкл/выкл)         → state_events
+--   discrete     — бинарное состояние (вкл/выкл)         → enum_history (как enum с двумя значениями)
 --   parameter    — уставка / настройка (редко меняется)   → parameter_history
 --
 -- states_json:
@@ -311,32 +311,8 @@ SELECT add_retention_policy(
 );
 
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 7. State events — дискретные/enum регистры (обычный PostgreSQL)
---
---    Отдельная таблица: нет агрегации, только журнал изменений.
---    Heartbeat пишется для детекции gap'ов (пропущенных событий).
---    Gap = интервал между записями > heartbeat_sec * 2.
--- ─────────────────────────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS state_events (
-    id              BIGSERIAL   PRIMARY KEY,
-    router_sn       TEXT        NOT NULL,
-    equip_type      TEXT        NOT NULL,
-    panel_id        INT         NOT NULL,
-    addr            INT         NOT NULL,
-    ts              TIMESTAMPTZ NOT NULL,
-    received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    raw             INT,
-    text            TEXT,
-    write_reason    TEXT        NOT NULL   -- 'change' | 'heartbeat'
-);
-
-CREATE INDEX IF NOT EXISTS idx_state_events_key_ts
-    ON state_events (router_sn, equip_type, panel_id, addr, ts DESC);
-
-CREATE INDEX IF NOT EXISTS idx_state_events_received_at
-    ON state_events (received_at DESC);
+-- (state_events удалена: discrete обрабатывается как enum → enum_history)
+DROP TABLE IF EXISTS state_events CASCADE;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -537,7 +513,7 @@ BEGIN
         GRANT SELECT ON ALL TABLES IN SCHEMA public TO cg_ui;
         GRANT UPDATE ON objects, equipment TO cg_ui;
         GRANT DELETE ON objects, equipment, latest_state,
-                        history, state_events, events,
+                        history, events,
                         gps_latest_filtered, data_gaps TO cg_ui;
         -- share_links: полное управление ссылками (явно, т.к. ALL TABLES может не покрывать)
         GRANT SELECT, INSERT, UPDATE, DELETE ON share_links TO cg_ui;
@@ -558,11 +534,11 @@ BEGIN
             ON objects, equipment, register_catalog,
                gps_raw_history, gps_latest_filtered,
                latest_state, history,
-               state_events, parameter_history, events, data_gaps,
+               parameter_history, events, data_gaps,
                fault_history, enum_history
             TO cg_writer;
         GRANT USAGE ON SEQUENCE
-            state_events_id_seq, parameter_history_id_seq, events_id_seq,
+            parameter_history_id_seq, events_id_seq,
             data_gaps_id_seq, fault_history_id_seq, enum_history_id_seq
             TO cg_writer;
     END IF;

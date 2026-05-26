@@ -36,7 +36,6 @@ EXPECTED_TABLES = [
     "gps_latest_filtered",
     "latest_state",
     "history",
-    "state_events",
     "parameter_history",
     "events",
     "data_gaps",
