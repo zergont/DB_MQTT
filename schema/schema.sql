@@ -61,7 +61,7 @@ ALTER TABLE equipment ADD COLUMN IF NOT EXISTS engine_sn    TEXT;
 --   enum         → {"labels":    {"0": "Auto",  "1": "Manual"},
 --                   "labels_ru": {"0": "Авто",  "1": "Ручной"}}  (labels_ru опционально)
 --   fault_bitmap → {"0": {"name": "...", "name_ru": "...", "severity": "..."}}
---                  (из bits в map; name_ru опционально — только где есть перевод)
+--                  (из bits в map, name_ru опционально — только где есть перевод)
 CREATE TABLE IF NOT EXISTS register_catalog (
     equip_type       TEXT        NOT NULL,
     addr             INT         NOT NULL,
@@ -516,10 +516,10 @@ SELECT
     h.value,
     h.raw,
     r.name_default   AS name,
-    r.name_ru,
     r.unit_default   AS unit,
     r.register_kind,
-    r.states_json
+    r.states_json,
+    r.name_ru                              -- добавляется в конец: CR OR REPLACE не меняет порядок существующих колонок
 FROM history h
 LEFT JOIN register_catalog r
     ON r.equip_type = h.equip_type
