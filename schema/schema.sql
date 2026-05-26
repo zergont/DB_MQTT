@@ -53,10 +53,8 @@ ALTER TABLE equipment ADD COLUMN IF NOT EXISTS engine_sn    TEXT;
 
 -- register_kind:
 --   analog       — измерение (ток, напряжение, мощность) → history + CA агрегация
---   enum         — перечислимое состояние (AUTO/MANUAL)   → history + enum_history
+--   enum         — перечислимое/дискретное состояние      → history + enum_history
 --   fault_bitmap — битовая маска аварий                   → history + fault_history
---   discrete     — бинарное состояние (вкл/выкл)         → enum_history (как enum с двумя значениями)
---   parameter    — уставка / настройка (редко меняется)   → parameter_history
 --
 -- states_json:
 --   enum         → {"labels":    {"0": "Auto",  "1": "Manual"},
@@ -70,7 +68,7 @@ CREATE TABLE IF NOT EXISTS register_catalog (
     name_ru          TEXT,                  -- перевод из map.notes_ru
     unit_default     TEXT,
     register_kind    TEXT        NOT NULL DEFAULT 'analog'
-                     CHECK (register_kind IN ('analog', 'discrete', 'enum', 'parameter', 'fault_bitmap')),
+                     CHECK (register_kind IN ('analog', 'enum', 'fault_bitmap')),
     states_json      JSONB,
     PRIMARY KEY (equip_type, addr)
 );
@@ -80,7 +78,7 @@ ALTER TABLE register_catalog ADD COLUMN IF NOT EXISTS states_json JSONB;
 ALTER TABLE register_catalog ADD COLUMN IF NOT EXISTS name_ru TEXT;
 ALTER TABLE register_catalog DROP CONSTRAINT IF EXISTS register_catalog_register_kind_check;
 ALTER TABLE register_catalog ADD CONSTRAINT register_catalog_register_kind_check
-    CHECK (register_kind IN ('analog', 'discrete', 'enum', 'parameter', 'fault_bitmap'));
+    CHECK (register_kind IN ('analog', 'enum', 'fault_bitmap'));
 
 
 -- ─────────────────────────────────────────────────────────────────────────────

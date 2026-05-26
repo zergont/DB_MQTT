@@ -78,7 +78,7 @@ ORDER BY o.name, e.equip_type, e.panel_id;
 | `name_default` | TEXT | название (English) |
 | `name_ru` | TEXT | название (русский) |
 | `unit_default` | TEXT | единица (`kW`, `bar`, `enum`, `fault_bitmap`, …) |
-| `register_kind` | TEXT | `analog` / `enum` / `fault_bitmap` / `discrete` / `parameter` |
+| `register_kind` | TEXT | `analog` / `enum` / `fault_bitmap` |
 | `states_json` | JSONB | расшифровка состояний (для enum и fault_bitmap) |
 
 **`states_json` по типам:**
