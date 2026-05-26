@@ -402,14 +402,14 @@ async def _handle_decoded(
                 await db.upsert_latest_state_batch(conn, list(latest_rows_map.values()))
             if history_batch:
                 await db.insert_history_batch(conn, history_batch)
-            if enum_open_batch:
-                await db.open_enum_state_batch(conn, enum_open_batch)
-            if enum_close_batch:
+            if enum_close_batch:                            # сначала закрываем старые
                 await db.close_enum_states_batch(conn, enum_close_batch)
-            if fault_open_batch:
-                await db.open_fault_batch(conn, fault_open_batch)
-            if fault_close_batch:
+            if enum_open_batch:                             # потом открываем новые
+                await db.open_enum_state_batch(conn, enum_open_batch)
+            if fault_close_batch:                           # сначала закрываем старые
                 await db.close_faults_batch(conn, fault_close_batch)
+            if fault_open_batch:                            # потом открываем новые
+                await db.open_fault_batch(conn, fault_open_batch)
             if event_rows:
                 await db.insert_event_batch(conn, event_rows)
 
