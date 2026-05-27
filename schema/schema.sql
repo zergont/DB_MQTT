@@ -502,7 +502,57 @@ LEFT JOIN register_catalog r
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 12. Права доступа
+-- 12. Утилиты
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- delete_device(router_sn) — удалить устройство и все связанные данные.
+-- TimescaleDB hypertables не поддерживают FK CASCADE, поэтому чистим вручную.
+-- Возвращает суммарное количество удалённых строк.
+CREATE OR REPLACE FUNCTION delete_device(p_router_sn TEXT)
+RETURNS TABLE (table_name TEXT, deleted_rows BIGINT)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_count BIGINT;
+BEGIN
+    DELETE FROM history              WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'history';              deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM latest_state         WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'latest_state';         deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM gps_raw_history      WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'gps_raw_history';      deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM gps_latest_filtered  WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'gps_latest_filtered';  deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM enum_history         WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'enum_history';         deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM fault_history        WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'fault_history';        deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM parameter_history    WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'parameter_history';    deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM data_gaps            WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'data_gaps';            deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM events               WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'events';               deleted_rows := v_count; RETURN NEXT;
+
+    -- equipment удаляется CASCADE из objects, но явно — для подсчёта
+    DELETE FROM equipment            WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'equipment';            deleted_rows := v_count; RETURN NEXT;
+
+    DELETE FROM objects              WHERE router_sn = p_router_sn; GET DIAGNOSTICS v_count = ROW_COUNT;
+    table_name := 'objects';              deleted_rows := v_count; RETURN NEXT;
+END;
+$$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 13. Права доступа
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- cg_ui: чтение всего + запись имён объектов
@@ -521,6 +571,8 @@ BEGIN
         GRANT SELECT ON fault_history, enum_history TO cg_ui;
         -- history_rich: VIEW с обогащёнными данными
         GRANT SELECT ON history_rich TO cg_ui;
+        -- delete_device: удаление устройства со всеми данными
+        GRANT EXECUTE ON FUNCTION delete_device(TEXT) TO cg_ui;
     END IF;
 END
 $$;
