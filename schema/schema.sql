@@ -510,7 +510,9 @@ LEFT JOIN register_catalog r
 -- Возвращает суммарное количество удалённых строк.
 CREATE OR REPLACE FUNCTION delete_device(p_router_sn TEXT)
 RETURNS TABLE (table_name TEXT, deleted_rows BIGINT)
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql
+SECURITY DEFINER                        -- выполняется с правами владельца (postgres)
+SET search_path = public AS $$
 DECLARE
     v_count BIGINT;
 BEGIN
