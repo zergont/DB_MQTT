@@ -49,6 +49,19 @@ EXPECTED_CA_VIEWS = [
     "history_1hour",
 ]
 
+# Таблицы, включаемые в публикацию для аналитики
+PUBLICATION_TABLES = [
+    "objects",
+    "equipment",
+    "register_catalog",
+    "history",
+    "events",
+    "data_gaps",
+    "enum_history",
+    "fault_history",
+    "parameter_history",
+]
+
 
 def _split_sql(sql: str) -> list[str]:
     """Split SQL into individual statements, respecting dollar-quoted blocks ($$...$$)."""
@@ -242,6 +255,112 @@ async def _ensure_role(conn, rolname: str, password: str) -> None:
         print(f"  Role exists: {rolname}")
 
 
+async def setup_replication(
+    cfg, su_user: str, su_password: str,
+    analytics_ip: str, repl_password: str,
+) -> None:
+    """Настройка логической репликации на сервере-источнике.
+
+    Вызов 1 (до перезапуска PostgreSQL): устанавливает wal_level = logical,
+    печатает инструкцию о перезапуске и завершается.
+
+    Вызов 2 (после перезапуска): создаёт роль cg_replicator и публикацию
+    analytics_pub.
+
+    Идемпотентен — безопасно запускать повторно.
+    """
+    import asyncpg
+
+    pg = cfg.postgres
+    print(f"Connecting as superuser: {su_user}@{pg.host}:{pg.port}/{pg.dbname}")
+    try:
+        conn: asyncpg.Connection = await asyncpg.connect(
+            host=pg.host, port=pg.port,
+            database=pg.dbname,
+            user=su_user,
+            password=su_password or None,
+        )
+    except Exception as e:
+        print(f"ОШИБКА подключения суперпользователя: {e}")
+        sys.exit(1)
+
+    try:
+        # ── Проверяем wal_level ───────────────────────────────────────────────
+        wal_level = await conn.fetchval("SHOW wal_level")
+        if wal_level != "logical":
+            print(f"  wal_level = {wal_level!r} → устанавливаю logical...")
+            await conn.execute("ALTER SYSTEM SET wal_level = 'logical'")
+            await conn.execute("ALTER SYSTEM SET max_replication_slots = 4")
+            await conn.execute("ALTER SYSTEM SET max_wal_senders = 4")
+            print("  Параметры записаны в postgresql.auto.conf")
+            print()
+            print("  ⚠  Требуется перезапуск PostgreSQL:")
+            print("       sudo systemctl restart postgresql")
+            print()
+            print("  После перезапуска запустите команду снова — будет создана")
+            print("  роль cg_replicator и публикация analytics_pub.")
+            return
+
+        print("  wal_level = logical ✓")
+
+        # ── Роль cg_replicator ────────────────────────────────────────────────
+        exists = await conn.fetchval(
+            "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'cg_replicator'"
+        )
+        if not exists:
+            await conn.execute(
+                f"CREATE ROLE cg_replicator WITH REPLICATION LOGIN "
+                f"PASSWORD '{repl_password}'"
+            )
+            print("  Создана роль: cg_replicator")
+        else:
+            print("  Роль cg_replicator уже существует")
+
+        # ── GRANT SELECT ──────────────────────────────────────────────────────
+        tables_str = ", ".join(PUBLICATION_TABLES)
+        await conn.execute(f"GRANT SELECT ON {tables_str} TO cg_replicator")
+        print(f"  GRANT SELECT на {len(PUBLICATION_TABLES)} таблиц → cg_replicator ✓")
+
+        # ── Публикация ────────────────────────────────────────────────────────
+        pub_exists = await conn.fetchval(
+            "SELECT 1 FROM pg_publication WHERE pubname = 'analytics_pub'"
+        )
+        if not pub_exists:
+            await conn.execute(
+                f"CREATE PUBLICATION analytics_pub FOR TABLE {tables_str}"
+            )
+            print("  Создана публикация: analytics_pub")
+        else:
+            print("  Публикация analytics_pub уже существует")
+
+        # ── Подсказка pg_hba.conf ─────────────────────────────────────────────
+        hba_path = await conn.fetchval("SHOW hba_file")
+        hba_entry = f"host  replication  cg_replicator  {analytics_ip}/32  md5"
+        try:
+            hba_content = open(hba_path, encoding="utf-8").read()
+            hba_ok = "cg_replicator" in hba_content
+        except Exception:
+            hba_ok = False
+
+        print()
+        if hba_ok:
+            print(f"  pg_hba.conf: запись для cg_replicator уже есть ✓")
+        else:
+            print(f"  ⚠  pg_hba.conf ({hba_path}) — добавьте вручную:")
+            print(f"     {hba_entry}")
+            print(f"  Затем выполните: SELECT pg_reload_conf();")
+
+        print()
+        print("Настройка репликации завершена.")
+        print(f"  Публикация:    analytics_pub")
+        print(f"  Таблицы:       {', '.join(PUBLICATION_TABLES)}")
+        print(f"  Пользователь:  cg_replicator  (пароль: {repl_password})")
+        print(f"  IP аналитики:  {analytics_ip}")
+
+    finally:
+        await conn.close()
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="CG DB-Writer v2.5.0 — setup database")
     p.add_argument("-c", "--config", default="config.yml", help="Path to config.yml")
@@ -250,10 +369,20 @@ def main() -> None:
     p.add_argument("--su-password", default="",
                    help="Superuser password (default: empty, works with trust/peer auth)")
     p.add_argument("--drop", action="store_true", help="Drop and recreate all tables")
+    p.add_argument("--setup-replication", metavar="ANALYTICS_IP",
+                   help="Configure logical replication for analytics server at given IP")
+    p.add_argument("--replication-password", default="cg_replicator",
+                   help="Password for cg_replicator role (default: cg_replicator)")
     args = p.parse_args()
 
     cfg = load_config(args.config)
-    asyncio.run(setup(cfg, args.su_user, args.su_password, args.drop))
+    if args.setup_replication:
+        asyncio.run(setup_replication(
+            cfg, args.su_user, args.su_password,
+            args.setup_replication, args.replication_password,
+        ))
+    else:
+        asyncio.run(setup(cfg, args.su_user, args.su_password, args.drop))
 
 
 if __name__ == "__main__":

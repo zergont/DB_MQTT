@@ -4,14 +4,19 @@
 #
 # Использование:
 #   chmod +x scripts/install.sh
-#   sudo ./scripts/install.sh
+#   sudo ./scripts/install.sh [--analytics-ip=IP] [--replication-password=PASS]
+#
+# Опции:
+#   --analytics-ip=IP           Включить репликацию для сервера аналитики
+#   --replication-password=PASS Пароль роли cg_replicator (default: cg_replicator)
 #
 # Что делает:
 #   1) Проверяет Python 3.10+ и TimescaleDB
 #   2) Устанавливает PostgreSQL (если нет) и создаёт БД/пользователя
 #   3) Создаёт venv и ставит зависимости
 #   4) Копирует config.example.yml → /opt/db-writer/config.yml (если нет)
-#   5) Устанавливает systemd unit-файл
+#   5) [Опционально] Настраивает логическую репликацию для аналитики
+#   6) Устанавливает systemd unit-файл
 # =============================================================================
 
 set -euo pipefail
@@ -21,15 +26,31 @@ INSTALL_DIR="/opt/db-writer"
 CONFIG_FILE="$INSTALL_DIR/config.yml"
 SERVICE_USER="cg"
 
+# ── Аргументы ────────────────────────────────────────────────────────────────
+ANALYTICS_IP=""
+REPL_PASS="cg_replicator"
+
+for arg in "$@"; do
+    case "$arg" in
+        --analytics-ip=*)          ANALYTICS_IP="${arg#*=}" ;;
+        --replication-password=*)  REPL_PASS="${arg#*=}" ;;
+    esac
+done
+
+# ── Счётчик шагов ────────────────────────────────────────────────────────────
+if [ -n "$ANALYTICS_IP" ]; then TOTAL=7; else TOTAL=6; fi
+STEP=0
+next_step() { STEP=$((STEP+1)); echo ""; echo "[$STEP/$TOTAL] $1"; }
+
 echo "============================================="
 echo "  CG DB-Writer — установка"
+[ -n "$ANALYTICS_IP" ] && echo "  Репликация → $ANALYTICS_IP"
 echo "============================================="
 echo ""
 
-# --- 1) Проверки ---
-echo "[1/6] Проверка зависимостей..."
+# ── [1] Проверка зависимостей ─────────────────────────────────────────────────
+next_step "Проверка зависимостей..."
 
-# Требуем Python 3.10+
 PYTHON_BIN=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
     if command -v "$candidate" &> /dev/null; then
@@ -51,7 +72,6 @@ if [ -z "$PYTHON_BIN" ]; then
     echo "  Установите Python 3.10+ (и пакет venv) и повторите установку."
     exit 1
 fi
-
 echo "  Python: $($PYTHON_BIN --version)"
 
 if ! command -v psql &> /dev/null; then
@@ -68,7 +88,6 @@ else
     fi
 fi
 
-# Проверяем TimescaleDB
 TS_INSTALLED=$(sudo -u postgres psql -tAc \
     "SELECT default_version FROM pg_available_extensions WHERE name='timescaledb'" 2>/dev/null || echo "")
 if [ -z "$TS_INSTALLED" ]; then
@@ -89,7 +108,6 @@ if [ -z "$TS_INSTALLED" ]; then
 fi
 echo "  TimescaleDB: $TS_INSTALLED"
 
-# --- 1b) Создание БД и пользователя ---
 PG_USER="cg_writer"
 PG_DB="cg_telemetry"
 PG_PASS="cg_writer"
@@ -108,9 +126,8 @@ else
     echo "  БД '$PG_DB' создана (owner: $PG_USER)"
 fi
 
-# --- 2) Установка файлов ---
-echo ""
-echo "[2/6] Копирование файлов в $INSTALL_DIR..."
+# ── [2] Установка файлов ──────────────────────────────────────────────────────
+next_step "Копирование файлов в $INSTALL_DIR..."
 
 if [ "$REPO_DIR" != "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
@@ -125,9 +142,8 @@ else
     echo "  Уже в $INSTALL_DIR, пропускаю"
 fi
 
-# --- 3) Virtual environment ---
-echo ""
-echo "[3/6] Создание venv и установка зависимостей..."
+# ── [3] Virtual environment ───────────────────────────────────────────────────
+next_step "Создание venv и установка зависимостей..."
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
@@ -143,9 +159,8 @@ venv/bin/pip install --quiet --upgrade pip
 venv/bin/pip install --quiet -r requirements.txt
 echo "  Зависимости установлены"
 
-# --- 4) Config ---
-echo ""
-echo "[4/6] Конфигурация..."
+# ── [4] Конфигурация и схема ──────────────────────────────────────────────────
+next_step "Конфигурация..."
 
 if [ ! -f "$CONFIG_FILE" ]; then
     cp "$INSTALL_DIR/config.example.yml" "$CONFIG_FILE"
@@ -155,8 +170,6 @@ else
     echo "  $CONFIG_FILE уже существует"
 fi
 
-# Применяем SQL схему напрямую через psql (нужны права суперпользователя
-# для TimescaleDB Continuous Aggregates и Retention/Compression policies)
 echo "  Применяю SQL схему..."
 if sudo -u postgres psql -d "$PG_DB" -f "$INSTALL_DIR/schema/schema.sql" > /dev/null 2>&1; then
     echo "  Схема применена"
@@ -165,9 +178,75 @@ else
     echo "    sudo -u postgres psql -d $PG_DB -f $INSTALL_DIR/schema/schema.sql"
 fi
 
-# --- 5) Системный пользователь и systemd ---
-echo ""
-echo "[5/6] Systemd..."
+# ── [5] Репликация для аналитики (опционально) ───────────────────────────────
+if [ -n "$ANALYTICS_IP" ]; then
+    next_step "Настройка репликации для аналитики ($ANALYTICS_IP)..."
+
+    # pg_hba.conf — добавляем запись для репликации
+    PG_HBA=$(sudo -u postgres psql -tAc "SHOW hba_file" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$PG_HBA" ]; then
+        if ! grep -q "cg_replicator" "$PG_HBA" 2>/dev/null; then
+            echo "host  replication  cg_replicator  ${ANALYTICS_IP}/32  md5" >> "$PG_HBA"
+            echo "  pg_hba.conf обновлён"
+        else
+            echo "  pg_hba.conf: запись уже существует"
+        fi
+    fi
+
+    # ALTER SYSTEM: wal_level = logical (применится после перезапуска)
+    sudo -u postgres psql -d "$PG_DB" -c "
+        ALTER SYSTEM SET wal_level = 'logical';
+        ALTER SYSTEM SET max_replication_slots = 4;
+        ALTER SYSTEM SET max_wal_senders = 4;
+    " > /dev/null
+    echo "  wal_level = logical (в postgresql.auto.conf)"
+
+    # Перезапуск PostgreSQL для применения wal_level
+    echo "  Перезапуск PostgreSQL..."
+    systemctl restart postgresql
+    sleep 3
+    echo "  PostgreSQL перезапущен"
+
+    # Создание роли и публикации (wal_level уже logical)
+    sudo -u postgres psql -d "$PG_DB" <<SQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'cg_replicator') THEN
+        CREATE ROLE cg_replicator WITH REPLICATION LOGIN PASSWORD '$REPL_PASS';
+        RAISE NOTICE 'Role cg_replicator created';
+    ELSE
+        RAISE NOTICE 'Role cg_replicator already exists';
+    END IF;
+END
+\$\$;
+
+GRANT SELECT ON
+    objects, equipment, register_catalog,
+    history, events, data_gaps,
+    enum_history, fault_history, parameter_history
+TO cg_replicator;
+
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'analytics_pub') THEN
+        CREATE PUBLICATION analytics_pub FOR TABLE
+            objects, equipment, register_catalog,
+            history, events, data_gaps,
+            enum_history, fault_history, parameter_history;
+        RAISE NOTICE 'Publication analytics_pub created';
+    ELSE
+        RAISE NOTICE 'Publication analytics_pub already exists';
+    END IF;
+END
+\$\$;
+SQL
+
+    echo "  ✓ Роль cg_replicator создана (пароль: $REPL_PASS)"
+    echo "  ✓ Публикация analytics_pub создана"
+fi
+
+# ── [6] Systemd ───────────────────────────────────────────────────────────────
+next_step "Systemd..."
 
 if ! id "$SERVICE_USER" &> /dev/null; then
     useradd -r -s /usr/sbin/nologin "$SERVICE_USER"
@@ -185,9 +264,8 @@ echo "  Systemd unit установлен, автозапуск включён"
 systemctl restart cg-db-writer
 echo "  Сервис cg-db-writer запущен"
 
-# --- 6) Проверка ---
-echo ""
-echo "[6/6] Проверка..."
+# ── [7] Проверка ──────────────────────────────────────────────────────────────
+next_step "Проверка..."
 sleep 2
 
 if systemctl is-active --quiet cg-db-writer; then
@@ -207,7 +285,7 @@ else
 fi
 rm -f /tmp/cg-health-check.txt
 
-# --- Итого ---
+# ── Итого ─────────────────────────────────────────────────────────────────────
 echo ""
 echo "============================================="
 echo "  Установка завершена!"
@@ -217,4 +295,12 @@ echo "  Код:     $INSTALL_DIR"
 echo "  Конфиг:  $CONFIG_FILE"
 echo "  Логи:    sudo journalctl -u cg-db-writer -f"
 echo "  Статус:  sudo systemctl status cg-db-writer"
+if [ -n "$ANALYTICS_IP" ]; then
+    echo ""
+    echo "  Репликация:"
+    echo "    Публикация:   analytics_pub"
+    echo "    Пользователь: cg_replicator / $REPL_PASS"
+    echo "    Аналитика:    $ANALYTICS_IP"
+    echo "    Инструкция:   docs/analytics_replication.md"
+fi
 echo ""
