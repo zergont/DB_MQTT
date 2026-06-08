@@ -1,3 +1,10 @@
+-- Copyright (c) 2026 ООО «НГ-ЭНЕРГОСЕРВИС». Все права защищены.
+-- Программный комплекс «Честная Генерация»
+-- Модуль записи телеметрии в базу данных
+-- Автор: Саввиди Александр Анатольевич | ИНН 4725009270
+--
+-- Конфиденциальная информация. Несанкционированное использование запрещено.
+
 -- =============================================================================
 -- CG Analytics — схема для сервера аналитики
 --
@@ -35,14 +42,19 @@ CREATE TABLE IF NOT EXISTS equipment (
 );
 
 CREATE TABLE IF NOT EXISTS register_catalog (
-    equip_type       TEXT        NOT NULL,
-    addr             INT         NOT NULL,
-    name_default     TEXT,
-    name_ru          TEXT,
-    unit_default     TEXT,
-    register_kind    TEXT        NOT NULL DEFAULT 'analog'
-                     CHECK (register_kind IN ('analog', 'enum', 'fault_bitmap')),
-    states_json      JSONB,
+    equip_type        TEXT        NOT NULL,
+    addr              INT         NOT NULL,
+    name_default      TEXT,
+    unit_default      TEXT,
+    register_kind     TEXT        NOT NULL DEFAULT 'analog'
+                      CHECK (register_kind IN ('analog', 'enum', 'fault_bitmap')),
+    value_kind        TEXT        NOT NULL DEFAULT 'analog',
+    tolerance         NUMERIC,
+    min_interval_sec  INT,
+    heartbeat_sec     INT,
+    store_history     BOOLEAN     NOT NULL DEFAULT true,
+    states_json       JSONB,
+    name_ru           TEXT,
     PRIMARY KEY (equip_type, addr)
 );
 
