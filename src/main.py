@@ -33,6 +33,7 @@ from src.gps_filter import GpsPoint
 from src.handlers import (
     dispatch,
     get_gps_filter,
+    heartbeat_flush_loop,
     restore_enum_states,
     restore_fault_bits,
     restore_gap_tracker,
@@ -278,6 +279,7 @@ async def _run(cfg: AppConfig, config_path: Path) -> None:
         tasks: list[asyncio.Task] = [
             asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded), name="mqtt_ingest"),
             asyncio.create_task(watchdog_loop(cfg, _last_seen, _panel_last_seen),  name="watchdog"),
+            asyncio.create_task(heartbeat_flush_loop(cfg, _panel_last_seen), name="heartbeat_flush"),
         ]
 
         if cfg.health.enabled:

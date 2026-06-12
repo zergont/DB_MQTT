@@ -104,6 +104,11 @@ class HistoryPolicyCfg:
     defaults: HistoryDefaults = field(default_factory=HistoryDefaults)
     kpi_registers: list[KpiRegister] = field(default_factory=list)
 
+    # Таймерный heartbeat: роутер не публикует регистр, пока значение не
+    # меняется, поэтому записи дописываются фоновой задачей.
+    heartbeat_scan_sec: int = 30          # период сканирования протухших регистров
+    heartbeat_source_alive_sec: int = 120  # панель «живая», если пакет был не позже
+
     def kpi_map(self) -> dict[tuple[str, int], KpiRegister]:
         """(equip_type, addr) → KpiRegister для быстрого поиска."""
         return {(k.equip_type, k.addr): k for k in self.kpi_registers}
@@ -209,7 +214,12 @@ def _parse_history(raw: dict[str, Any] | None) -> HistoryPolicyCfg:
     defaults = _merge(HistoryDefaults, raw.get("defaults"))
     kpi_raw = raw.get("kpi_registers") or []
     kpis = [_merge(KpiRegister, k) for k in kpi_raw]
-    return HistoryPolicyCfg(defaults=defaults, kpi_registers=kpis)
+    cfg = HistoryPolicyCfg(defaults=defaults, kpi_registers=kpis)
+    if "heartbeat_scan_sec" in raw:
+        cfg.heartbeat_scan_sec = int(raw["heartbeat_scan_sec"])
+    if "heartbeat_source_alive_sec" in raw:
+        cfg.heartbeat_source_alive_sec = int(raw["heartbeat_source_alive_sec"])
+    return cfg
 
 
 def parse_config_dict(raw: dict[str, Any]) -> AppConfig:

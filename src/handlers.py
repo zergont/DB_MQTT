@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -125,17 +126,41 @@ async def restore_gap_tracker() -> None:
 # Dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def _parse_json_payload(topic: str, payload_bytes: bytes) -> dict[str, Any] | None:
+    """Распарсить JSON payload в dict.
+
+    Неразбираемый payload — не повод для ретраев воркера: логируем и None.
+    """
+    try:
+        data = json.loads(payload_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning("Bad JSON on %s: %s", topic, e)
+        return None
+    if not isinstance(data, dict):
+        logger.warning("Payload on %s is not a JSON object", topic)
+        return None
+    return data
+
+
 async def dispatch(topic: str, payload_bytes: bytes, cfg: AppConfig) -> None:
     """Главная точка входа: topic + raw payload → обработка."""
+
+    # Gzip-пакеты на cg/v1/telemetry — сжатые регистровые дампы, их потребитель
+    # декодер. db-writer берёт из telemetry только GPS, он приходит несжатым.
+    # Признак жизни роутера не теряется: _last_seen обновляется при приёме.
+    if payload_bytes[:2] == _GZIP_MAGIC:
+        logger.debug("Skipping gzip payload on %s (decoder input, not ours)", topic)
+        return
 
     # Register map (retained, обновляется при старте и при изменениях)
     m_maps = _RE_MAPS.match(topic)
     if m_maps:
         device_type = m_maps.group(1)
-        try:
-            data = json.loads(payload_bytes)
-        except json.JSONDecodeError as e:
-            logger.warning("Bad JSON on maps %s: %s", topic, e)
+        data = _parse_json_payload(topic, payload_bytes)
+        if data is None:
             return
         register_map.update(device_type, data)
         async with db.pool().acquire() as conn:
@@ -145,10 +170,8 @@ async def dispatch(topic: str, payload_bytes: bytes, cfg: AppConfig) -> None:
     m_tel = _RE_TELEMETRY.match(topic)
     if m_tel:
         router_sn = m_tel.group(1)
-        try:
-            data = json.loads(payload_bytes)
-        except json.JSONDecodeError as e:
-            logger.warning("Bad JSON on %s: %s", topic, e)
+        data = _parse_json_payload(topic, payload_bytes)
+        if data is None:
             return
         await _handle_telemetry(router_sn, data, cfg)
         return
@@ -158,10 +181,8 @@ async def dispatch(topic: str, payload_bytes: bytes, cfg: AppConfig) -> None:
         router_sn  = m_dec.group(1)
         equip_type = m_dec.group(2)
         panel_id   = int(m_dec.group(3))
-        try:
-            data = json.loads(payload_bytes)
-        except json.JSONDecodeError as e:
-            logger.warning("Bad JSON on %s: %s", topic, e)
+        data = _parse_json_payload(topic, payload_bytes)
+        if data is None:
             return
         await _handle_decoded(router_sn, equip_type, panel_id, data, cfg)
         return
@@ -611,3 +632,80 @@ def _update_last_write_ts(key: tuple, ts: datetime) -> None:
             "_last_write_ts cache size=%d exceeds %d — possible memory growth",
             len(_last_write_ts), _WRITE_TS_CACHE_WARN,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Timer-driven heartbeat
+# ─────────────────────────────────────────────────────────────────────────────
+# Роутер не публикует регистр, пока его значение не меняется (экономия
+# трафика). Событийный heartbeat в _process_register в этом случае не
+# срабатывает: нет сообщения — нет записи. Пока панель живая (пакеты
+# приходят), дописываем последнее известное значение аналоговых регистров.
+
+async def heartbeat_flush_loop(
+    cfg: AppConfig,
+    panel_last_seen: dict[tuple[str, str, int], datetime],
+) -> None:
+    hp = cfg.history_policy
+    scan_sec = max(5, hp.heartbeat_scan_sec)
+    kpi_map  = hp.kpi_map()
+    logger.info(
+        "Heartbeat flush loop started (scan=%ds, source_alive=%ds)",
+        scan_sec, hp.heartbeat_source_alive_sec,
+    )
+    while True:
+        await asyncio.sleep(scan_sec)
+        try:
+            await _heartbeat_flush_once(cfg, kpi_map, panel_last_seen)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Heartbeat flush failed")
+
+
+async def _heartbeat_flush_once(
+    cfg: AppConfig,
+    kpi_map: dict[tuple[str, int], Any],
+    panel_last_seen: dict[tuple[str, str, int], datetime],
+) -> None:
+    now = datetime.now(timezone.utc)
+    alive_sec = cfg.history_policy.heartbeat_source_alive_sec
+
+    alive_panels = {
+        pkey for pkey, seen in panel_last_seen.items()
+        if (now - seen).total_seconds() <= alive_sec
+    }
+    if not alive_panels:
+        return
+
+    # Аналоговые регистры живых панелей, по которым давно не было записи
+    stale: dict[tuple[str, str, int], list[int]] = {}
+    for (sn, et, pid, addr), wts in _last_write_ts.items():
+        if (sn, et, pid) not in alive_panels:
+            continue
+        params = resolve_params(cfg, et, addr, register_map.get_unit(et, addr), kpi_map)
+        if params.register_kind != "analog" or not params.store_history:
+            continue
+        if (now - wts).total_seconds() < params.heartbeat_sec:
+            continue
+        stale.setdefault((sn, et, pid), []).append(addr)
+
+    if not stale:
+        return
+
+    written = 0
+    async with db.pool().acquire() as conn:
+        for (sn, et, pid), addrs in stale.items():
+            prev_map = await db.get_latest_state_rows_many(conn, sn, et, pid, addrs)
+            batch: list[tuple] = []
+            for addr in addrs:
+                prev = prev_map.get(addr)
+                if prev is None or prev["value"] is None:
+                    continue
+                batch.append((sn, et, pid, addr, now, prev["value"], prev["raw"]))
+                _update_last_write_ts((sn, et, pid, addr), now)
+            await db.insert_history_batch(conn, batch)
+            written += len(batch)
+
+    if written:
+        logger.debug("Heartbeat flush: %d stale register(s) written", written)
