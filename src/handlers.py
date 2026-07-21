@@ -42,9 +42,6 @@ _WRITE_TS_CACHE_WARN = 100_000
 _last_packet_ts: dict[tuple[str, str, int], datetime] = {}
 _avg_interval:   dict[tuple[str, str, int], float] = {}
 
-# Трекер открытых gap'ов
-_open_gaps: dict[tuple[str, str, int], bool] = {}
-
 # Кэш активных fault-битов: (router_sn, equip_type, panel_id, addr) → set of bit numbers
 _active_fault_bits: dict[tuple[str, str, int, int], set[int]] = {}
 
@@ -107,19 +104,16 @@ async def restore_enum_states() -> None:
 
 
 async def restore_gap_tracker() -> None:
-    """При старте восстановить открытые gap'ы из data_gaps.
+    """При старте — только информационный лог.
 
-    _last_packet_ts не восстанавливаем: после рестарта первый пакет
-    инициализирует baseline по device-time. Открытые gap'ы закроются
-    при получении следующего пакета.
+    Открытые gap'ы (gap_end IS NULL) закрываются безусловно при получении
+    следующего нормального пакета для того же оборудования (см.
+    _check_equipment_gap), независимо от того, помнит ли о них текущий
+    процесс — поэтому отдельный in-memory трекер открытых gap'ов не нужен.
     """
     async with db.pool().acquire() as conn:
         gap_rows = await db.get_open_gaps(conn)
-        for r in gap_rows:
-            ekey = (r["router_sn"], r["equip_type"], r["panel_id"])
-            _open_gaps[ekey] = True
-
-    logger.info("Restored gap tracker: %d open gaps", len(_open_gaps))
+    logger.info("Gap tracker startup: %d open gap(s) in DB", len(gap_rows))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,7 +300,6 @@ async def _check_equipment_gap(
             _last_packet_ts[ekey] = ts
             return
 
-        has_open_gap = _open_gaps.get(ekey, False)
         avg = _avg_interval.get(ekey)
 
         if avg is None:
@@ -319,25 +312,21 @@ async def _check_equipment_gap(
             if not is_gap:
                 _avg_interval[ekey] = gap_cfg.ema_alpha * elapsed + (1 - gap_cfg.ema_alpha) * avg
 
-        if is_gap and not has_open_gap:
+        if is_gap:
             gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
             logger.info(
                 "GAP opened id=%d %s/%s/%d: elapsed=%.0fs threshold=%.0fs avg=%.0fs",
                 gap_id, router_sn, equip_type, panel_id, elapsed, threshold, avg,
             )
-            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, ts)
-            _open_gaps[ekey] = False
+
+        # Безусловно: закрыть любой открытый gap (gap_end IS NULL) для этого
+        # оборудования, включая тот, что открыт строкой выше, и любые "осиротевшие"
+        # записи из прошлого (не зависит от in-memory состояния процесса).
+        count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, ts)
+        if count:
             logger.info(
                 "GAP closed %s/%s/%d: %d gap(s) closed",
                 router_sn, equip_type, panel_id, count,
-            )
-
-        elif has_open_gap:
-            count = await db.close_data_gap(conn, router_sn, equip_type, panel_id, ts)
-            _open_gaps[ekey] = False
-            logger.info(
-                "GAP closed (restored) %s/%s/%d: %d gap(s) closed, elapsed=%.0fs",
-                router_sn, equip_type, panel_id, count, elapsed,
             )
 
     _last_packet_ts[ekey] = ts

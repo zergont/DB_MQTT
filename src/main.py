@@ -83,6 +83,32 @@ def _touch_last_seen(topic: str) -> None:
             pass
 
 
+def _decoded_shard_key(topic: str) -> tuple[str, str, int] | None:
+    """Ключ оборудования (router_sn, equip_type, panel_id) из decoded-топика.
+
+    Используется для шардирования между воркерами: пакеты одного
+    оборудования всегда попадают в одну и ту же очередь/воркер, что
+    исключает гонку в gap-детекторе (см. _check_equipment_gap).
+    """
+    parts = topic.split("/")
+    if len(parts) == 7 and parts[0] == "cg" and parts[2] == "decoded" and parts[3] == "SN":
+        try:
+            return (parts[4], parts[5], int(parts[6]))
+        except ValueError:
+            return None
+    return None
+
+
+class _QueueGroup:
+    """Обёртка над несколькими очередями для агрегированной отчётности в health."""
+
+    def __init__(self, queues: list[asyncio.Queue[_IngestItem]]) -> None:
+        self._queues = queues
+
+    def qsize(self) -> int:
+        return sum(q.qsize() for q in self._queues)
+
+
 async def _restore_gps_state(cfg: AppConfig) -> None:
     """При старте загружаем последние принятые GPS точки в фильтры."""
     async with db.pool().acquire() as conn:
@@ -139,7 +165,7 @@ async def _queue_put(
 async def _mqtt_ingest_loop(
     cfg: AppConfig,
     q_telemetry: asyncio.Queue[_IngestItem],
-    q_decoded: asyncio.Queue[_IngestItem],
+    q_decoded_shards: list[asyncio.Queue[_IngestItem]],
 ) -> None:
     """Подключение к MQTT и распределение сообщений по очередям."""
     mc = cfg.mqtt
@@ -189,11 +215,15 @@ async def _mqtt_ingest_loop(
                             log_name="telemetry",
                         )
                     else:
+                        ekey = _decoded_shard_key(topic)
+                        shard_idx = (
+                            hash(ekey) if ekey is not None else hash(topic)
+                        ) % len(q_decoded_shards)
                         await _queue_put(
-                            q_decoded, item,
+                            q_decoded_shards[shard_idx], item,
                             drop_when_full=ic.drop_decoded_when_full,
                             drop_policy=ic.drop_decoded_policy,
-                            log_name="decoded",
+                            log_name=f"decoded[{shard_idx}]",
                         )
 
         except aiomqtt.MqttError as e:
@@ -214,7 +244,9 @@ async def _worker_loop(
 ) -> None:
     """DB-воркер: вытаскивает из очередей и пишет в БД.
 
-    Приоритет: telemetry → decoded.
+    Приоритет: telemetry (общая очередь) → decoded (свой шард по ekey,
+    см. _decoded_shard_key — гарантирует, что пакеты одного оборудования
+    всегда обрабатываются одним воркером последовательно).
     Ретрай при временных ошибках БД.
     """
     ic = cfg.ingest
@@ -265,9 +297,16 @@ async def _run(cfg: AppConfig, config_path: Path) -> None:
     """Запускает все подсистемы."""
     await db.init_pool(cfg.postgres)
 
+    worker_count = max(1, cfg.ingest.worker_count)
+
     q_telemetry: asyncio.Queue[_IngestItem] = asyncio.Queue(maxsize=cfg.ingest.telemetry_queue_maxsize)
-    q_decoded:   asyncio.Queue[_IngestItem] = asyncio.Queue(maxsize=cfg.ingest.decoded_queue_maxsize)
-    health_state = HealthState(q_decoded=q_decoded, q_telemetry=q_telemetry)
+    # По одной decoded-очереди на воркера: пакеты одного оборудования
+    # (router_sn, equip_type, panel_id) всегда шардируются в одну и ту же
+    # очередь (см. _decoded_shard_key), что убирает гонку в gap-детекторе.
+    q_decoded_shards: list[asyncio.Queue[_IngestItem]] = [
+        asyncio.Queue(maxsize=cfg.ingest.decoded_queue_maxsize) for _ in range(worker_count)
+    ]
+    health_state = HealthState(q_decoded=_QueueGroup(q_decoded_shards), q_telemetry=q_telemetry)
 
     try:
         await _restore_gps_state(cfg)
@@ -277,7 +316,7 @@ async def _run(cfg: AppConfig, config_path: Path) -> None:
         await restore_enum_states()
 
         tasks: list[asyncio.Task] = [
-            asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded), name="mqtt_ingest"),
+            asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded_shards), name="mqtt_ingest"),
             asyncio.create_task(watchdog_loop(cfg, _last_seen, _panel_last_seen),  name="watchdog"),
             asyncio.create_task(heartbeat_flush_loop(cfg, _panel_last_seen), name="heartbeat_flush"),
         ]
@@ -295,9 +334,9 @@ async def _run(cfg: AppConfig, config_path: Path) -> None:
                 name="health_loop",
             ))
 
-        for i in range(max(1, cfg.ingest.worker_count)):
+        for i in range(worker_count):
             tasks.append(asyncio.create_task(
-                _worker_loop(i + 1, cfg, q_telemetry, q_decoded, health_state),
+                _worker_loop(i + 1, cfg, q_telemetry, q_decoded_shards[i], health_state),
                 name=f"worker_{i + 1}",
             ))
 
