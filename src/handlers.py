@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -47,6 +48,58 @@ _active_fault_bits: dict[tuple[str, str, int, int], set[int]] = {}
 
 # Кэш активных enum-состояний: (router_sn, equip_type, panel_id, addr) → value (int)
 _active_enum_states: dict[tuple[str, str, int, int], int] = {}
+
+# Столбец raw в history/latest_state — INT (int4). Значения вне диапазона
+# (u32 больше 2^31-1) пишутся как NULL, иначе executemany откатывает весь пакет.
+_RAW_INT4_MIN = -2**31
+_RAW_INT4_MAX = 2**31 - 1
+
+# Троттлинг WARNING о raw вне int4: (router_sn, equip_type, panel_id, addr) → datetime
+_raw_overflow_warned: dict[tuple[str, str, int, int], datetime] = {}
+_RAW_OVERFLOW_WARN_EVERY_SEC = 3600
+
+
+class PacketDataError(Exception):
+    """Ошибка данных пакета (asyncpg.DataError) с указанием регистра.
+
+    Детерминированная: повтор того же пакета упадёт так же, ретраи не нужны.
+    """
+
+
+class _StateDelta:
+    """Изменения in-memory состояния, накопленные за один пакет decoded.
+
+    Применяются (apply) только после commit транзакции пакета. Если запись
+    упала, состояние остаётся прежним: повтор пакета снова увидит переходы
+    enum/fault как изменения и запишет открытие/закрытие периодов.
+    """
+
+    __slots__ = ("packet_ts", "avg_interval", "fault_bits", "enum_states", "write_ts")
+
+    def __init__(self) -> None:
+        self.packet_ts:    dict[tuple[str, str, int], datetime] = {}
+        self.avg_interval: dict[tuple[str, str, int], float] = {}
+        self.fault_bits:   dict[tuple[str, str, int, int], set[int]] = {}
+        self.enum_states:  dict[tuple[str, str, int, int], int | None] = {}
+        self.write_ts:     dict[tuple[str, str, int, int], datetime] = {}
+
+    def active_fault_bits(self, key: tuple[str, str, int, int]) -> set[int]:
+        if key in self.fault_bits:
+            return self.fault_bits[key]
+        return _active_fault_bits.get(key, set())
+
+    def active_enum_state(self, key: tuple[str, str, int, int]) -> int | None:
+        if key in self.enum_states:
+            return self.enum_states[key]
+        return _active_enum_states.get(key)
+
+    def apply(self) -> None:
+        _last_packet_ts.update(self.packet_ts)
+        _avg_interval.update(self.avg_interval)
+        _active_fault_bits.update(self.fault_bits)
+        _active_enum_states.update(self.enum_states)
+        for key, ts in self.write_ts.items():
+            _update_last_write_ts(key, ts)
 
 # Regex для разбора топиков
 _RE_TELEMETRY = re.compile(r"^cg/v1/telemetry/SN/([^/]+)$")
@@ -282,12 +335,15 @@ async def _check_equipment_gap(
     panel_id: int,
     ts: datetime,          # device time из payload
     gap_cfg: GapDetectorCfg,
+    delta: _StateDelta,
 ) -> None:
     """Проверка gap'а на уровне оборудования.
 
     Использует device-time (ts) для корректной обработки буферизации:
     если роутер потерял связь, накопил пакеты и выслал их пачкой,
     интервалы по device-time будут нормальными — ложного gap'а не будет.
+
+    Новое состояние трекера пишется в delta и применяется после commit.
     """
     ekey = (router_sn, equip_type, panel_id)
     prev_ts = _last_packet_ts.get(ekey)
@@ -297,20 +353,20 @@ async def _check_equipment_gap(
 
         # Защита от отрицательного elapsed (пакеты пришли не по порядку)
         if elapsed < 0:
-            _last_packet_ts[ekey] = ts
+            delta.packet_ts[ekey] = ts
             return
 
         avg = _avg_interval.get(ekey)
 
         if avg is None:
-            _avg_interval[ekey] = elapsed
+            delta.avg_interval[ekey] = elapsed
             avg = elapsed
             is_gap = False
         else:
             threshold = max(avg * gap_cfg.multiplier, float(gap_cfg.min_threshold_sec))
             is_gap = elapsed > threshold
             if not is_gap:
-                _avg_interval[ekey] = gap_cfg.ema_alpha * elapsed + (1 - gap_cfg.ema_alpha) * avg
+                delta.avg_interval[ekey] = gap_cfg.ema_alpha * elapsed + (1 - gap_cfg.ema_alpha) * avg
 
         if is_gap:
             gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
@@ -329,7 +385,7 @@ async def _check_equipment_gap(
                 router_sn, equip_type, panel_id, count,
             )
 
-    _last_packet_ts[ekey] = ts
+    delta.packet_ts[ekey] = ts
 
 
 async def _handle_decoded(
@@ -372,13 +428,19 @@ async def _handle_decoded(
     fault_close_batch: list[tuple] = []
     event_rows:        list[tuple] = []
 
+    # In-memory состояние меняем только после commit (см. _StateDelta)
+    delta = _StateDelta()
+    pkt = (router_sn, equip_type, panel_id)
+
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             await db.upsert_object(conn, router_sn)
             await db.upsert_equipment(conn, router_sn, equip_type, panel_id)
 
             # Gap detection по device-time
-            await _check_equipment_gap(conn, router_sn, equip_type, panel_id, ts, cfg.gap_detector)
+            await _check_equipment_gap(
+                conn, router_sn, equip_type, panel_id, ts, cfg.gap_detector, delta,
+            )
 
             prev_map = await db.get_latest_state_rows_many(
                 conn, router_sn, equip_type, panel_id, addrs,
@@ -393,7 +455,8 @@ async def _handle_decoded(
                     if addr is not None:
                         _process_fault_bitmap(
                             router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
-                            addr=addr, raw_val=_safe_int(reg.get("raw")),
+                            addr=addr,
+                            raw_val=_raw_for_db(reg, router_sn, equip_type, panel_id, addr, now),
                             value_dict=value, ts=ts,
                             prev_map=prev_map,
                             latest_rows_map=latest_rows_map,
@@ -402,6 +465,7 @@ async def _handle_decoded(
                             fault_close_batch=fault_close_batch,
                             event_rows=event_rows,
                             cfg=cfg,
+                            delta=delta,
                         )
                     continue
 
@@ -415,22 +479,32 @@ async def _handle_decoded(
                     enum_open_batch=enum_open_batch,
                     enum_close_batch=enum_close_batch,
                     event_rows=event_rows,
+                    delta=delta,
                 )
 
             if latest_rows_map:
-                await db.upsert_latest_state_batch(conn, list(latest_rows_map.values()))
+                await _write_batch("latest_state", db.upsert_latest_state_batch,
+                                   conn, list(latest_rows_map.values()), pkt)
             if history_batch:
-                await db.insert_history_batch(conn, history_batch)
+                await _write_batch("history", db.insert_history_batch,
+                                   conn, history_batch, pkt)
             if enum_close_batch:                            # сначала закрываем старые
-                await db.close_enum_states_batch(conn, enum_close_batch)
+                await _write_batch("enum_close", db.close_enum_states_batch,
+                                   conn, enum_close_batch, pkt)
             if enum_open_batch:                             # потом открываем новые
-                await db.open_enum_state_batch(conn, enum_open_batch)
+                await _write_batch("enum_open", db.open_enum_state_batch,
+                                   conn, enum_open_batch, pkt)
             if fault_close_batch:                           # сначала закрываем старые
-                await db.close_faults_batch(conn, fault_close_batch)
+                await _write_batch("fault_close", db.close_faults_batch,
+                                   conn, fault_close_batch, pkt)
             if fault_open_batch:                            # потом открываем новые
-                await db.open_fault_batch(conn, fault_open_batch)
+                await _write_batch("fault_open", db.open_fault_batch,
+                                   conn, fault_open_batch, pkt)
             if event_rows:
                 await db.insert_event_batch(conn, event_rows)
+
+    # Транзакция зафиксирована — теперь можно обновить in-memory состояние
+    delta.apply()
 
     logger.debug(
         "Decoded %s/%s/%d: %d regs, latest=%d, history=%d, "
@@ -459,6 +533,7 @@ def _process_fault_bitmap(
     fault_close_batch: list[tuple],
     event_rows: list[tuple],
     cfg: AppConfig,
+    delta: _StateDelta,
 ) -> None:
     """Обработка fault bitmap регистра.
 
@@ -471,7 +546,7 @@ def _process_fault_bitmap(
     current_bits: set[int] = {f["bit"] for f in faults_list if "bit" in f}
 
     fkey = (router_sn, equip_type, panel_id, addr)
-    prev_bits: set[int] = _active_fault_bits.get(fkey, set())
+    prev_bits: set[int] = delta.active_fault_bits(fkey)
 
     appeared = current_bits - prev_bits
     cleared  = prev_bits - current_bits
@@ -498,7 +573,7 @@ def _process_fault_bitmap(
             router_sn, equip_type, panel_id, addr, bit,
         )
 
-    _active_fault_bits[fkey] = current_bits
+    delta.fault_bits[fkey] = current_bits
 
     # История raw-значения в history (только при изменении)
     prev = prev_map.get(addr)
@@ -528,6 +603,7 @@ def _process_register(
     enum_open_batch: list[tuple],
     enum_close_batch: list[tuple],
     event_rows: list[tuple],
+    delta: _StateDelta,
 ) -> None:
     try:
         addr = int(reg["addr"])
@@ -539,8 +615,9 @@ def _process_register(
     if reg.get("reason"):
         return
 
-    value   = reg.get("value")
-    raw_val = _safe_int(reg.get("raw"))
+    # na=true — сервисный код «нет данных»: value=NULL, raw=NULL (прочерк в latest_state)
+    value   = None if reg.get("na") else reg.get("value")
+    raw_val = _raw_for_db(reg, router_sn, equip_type, panel_id, addr, now)
 
     # Тип регистра из in-memory map
     map_unit = register_map.get_unit(equip_type, addr)
@@ -575,17 +652,17 @@ def _process_register(
         )
         if decision.write:
             history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
-            _update_last_write_ts(key, now)
+            delta.write_ts[key] = now
 
         # enum_history: открываем/закрываем периоды состояния
         ekey = (router_sn, equip_type, panel_id, addr)
-        prev_enum_val = _active_enum_states.get(ekey)
+        prev_enum_val = delta.active_enum_state(ekey)
         if raw_val != prev_enum_val:
             if prev_enum_val is not None:
                 enum_close_batch.append((router_sn, equip_type, panel_id, addr, ts))
             if raw_val is not None:
                 enum_open_batch.append((router_sn, equip_type, panel_id, addr, raw_val, ts))
-            _active_enum_states[ekey] = raw_val
+            delta.enum_states[ekey] = raw_val
 
     else:
         # ── Аналог (default): change + tolerance + heartbeat ─────────────
@@ -598,7 +675,7 @@ def _process_register(
         )
         if decision.write:
             history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
-            _update_last_write_ts(key, now)
+            delta.write_ts[key] = now
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,6 +689,67 @@ def _safe_int(v: Any) -> int | None:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _raw_for_db(
+    reg: dict[str, Any],
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    addr: int,
+    now: datetime,
+) -> int | None:
+    """raw для записи в БД (столбец raw — INT).
+
+    - na=true (сервисный код «нет данных») → NULL: сырой код не нужен.
+    - вне int4 (u32 больше 2^31-1) → NULL + WARNING (не чаще раза в час на
+      регистр). Пакет при этом пишется, значение остаётся в value (NUMERIC).
+    """
+    if reg.get("na"):
+        return None
+    raw = _safe_int(reg.get("raw"))
+    if raw is None or _RAW_INT4_MIN <= raw <= _RAW_INT4_MAX:
+        return raw
+
+    key = (router_sn, equip_type, panel_id, addr)
+    last = _raw_overflow_warned.get(key)
+    if last is None or (now - last).total_seconds() >= _RAW_OVERFLOW_WARN_EVERY_SEC:
+        _raw_overflow_warned[key] = now
+        logger.warning(
+            "raw out of int4 range %s/%s/%d addr=%d raw=%d value=%s: writing raw=NULL",
+            router_sn, equip_type, panel_id, addr, raw, reg.get("value"),
+        )
+    return None
+
+
+_RE_EXECUTEMANY_ELEMENT = re.compile(r"element #(\d+) of executemany")
+
+
+async def _write_batch(
+    name: str,
+    write: Callable[[asyncpg.Connection, list[tuple]], Awaitable[None]],
+    conn: asyncpg.Connection,
+    rows: list[tuple],
+    pkt: tuple[str, str, int],
+) -> None:
+    """Записать батч; при ошибке данных указать регистр, на котором упало.
+
+    rows — кортежи вида (router_sn, equip_type, panel_id, addr, ...).
+    asyncpg сообщает номер строки executemany ("element #N") — по нему
+    находим addr; если номера нет, перечисляем addr всего батча.
+    """
+    try:
+        await write(conn, rows)
+    except asyncpg.DataError as e:
+        router_sn, equip_type, panel_id = pkt
+        m = _RE_EXECUTEMANY_ELEMENT.search(str(e))
+        if m and int(m.group(1)) < len(rows):
+            where = f"addr={rows[int(m.group(1))][3]}"
+        else:
+            where = f"addrs={sorted({r[3] for r in rows})}"
+        raise PacketDataError(
+            f"{name} {router_sn}/{equip_type}/{panel_id} {where}: {e}"
+        ) from e
 
 
 def _update_last_write_ts(key: tuple, ts: datetime) -> None:
@@ -692,8 +830,10 @@ async def _heartbeat_flush_once(
                 if prev is None or prev["value"] is None:
                     continue
                 batch.append((sn, et, pid, addr, now, prev["value"], prev["raw"]))
-                _update_last_write_ts((sn, et, pid, addr), now)
             await db.insert_history_batch(conn, batch)
+            # Время записи — только после успешной вставки
+            for row in batch:
+                _update_last_write_ts(row[:4], now)
             written += len(batch)
 
     if written:

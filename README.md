@@ -473,6 +473,8 @@ cg-db-writer/
 │   ├── check_health.py         # Проверка подключений и данных
 │   ├── test_publish.py         # Тестовая публикация в MQTT
 │   └── smoke_test.py           # Локальный тест без MQTT/Postgres
+├── tests/                      # Юнит-тесты (unittest, без MQTT/Postgres):
+│   └── test_decoded_write.py   #   python -m unittest discover -s tests -t .
 ├── systemd/
 │   ├── cg-db-writer.service    # systemd unit
 └── README.md

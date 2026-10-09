@@ -26,11 +26,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aiomqtt
+import asyncpg
 
 from src import db
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
 from src.handlers import (
+    PacketDataError,
     dispatch,
     get_gps_filter,
     heartbeat_flush_loop,
@@ -272,6 +274,14 @@ async def _worker_loop(
                     break
                 except asyncio.CancelledError:
                     raise
+                except (PacketDataError, asyncpg.DataError) as e:
+                    # Ошибка данных детерминирована: повтор упадёт так же
+                    # и только займёт воркер на время ретраев.
+                    logger.error(
+                        "Worker-%d: dropped topic=%s (data error, no retry): %s",
+                        worker_id, item.topic, e,
+                    )
+                    break
                 except Exception as e:
                     attempt += 1
                     if attempt > ic.worker_max_retries:

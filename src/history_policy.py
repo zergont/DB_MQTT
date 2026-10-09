@@ -120,8 +120,13 @@ def should_write(
     if elapsed is not None and elapsed < params.min_interval_sec:
         return WriteDecision(False)
 
-    # Детектирование изменения по raw (точный целочисленный сигнал)
-    changed = new_raw != prev_raw
+    # Детектирование изменения по raw (точный целочисленный сигнал).
+    # raw=NULL с обеих сторон (na или вне int4) — сравниваем по value,
+    # иначе изменения такого регистра видны только по heartbeat.
+    if new_raw is None and prev_raw is None:
+        changed = new_value != prev_value
+    else:
+        changed = new_raw != prev_raw
 
     # Для аналогов — дополнительно проверяем tolerance по float-значению
     if not changed and params.tolerance is not None:
