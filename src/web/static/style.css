@@ -199,6 +199,42 @@ body {
   border-color: var(--primary);
 }
 
+/* ── Незаписанные пакеты ────────────────────────────────────────── */
+
+.failed-summary {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.failed-table td {
+  vertical-align: top;
+}
+
+.failed-table td.failed-nowrap {
+  white-space: nowrap;
+}
+
+.failed-table td.failed-topic {
+  min-width: 150px;
+  overflow-wrap: anywhere;
+}
+
+.failed-table td.failed-reason {
+  min-width: 260px;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.section-header .badge {
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
 /* ── Buttons ────────────────────────────────────────────────────── */
 
 .btn {

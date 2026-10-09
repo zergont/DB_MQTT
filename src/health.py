@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,19 @@ from src.version import get_version
 
 logger = logging.getLogger("cg.health")
 
+# Сколько последних незаписанных пакетов держать в памяти для веб-интерфейса
+FAILED_RECENT_MAX = 50
+_FAILED_REASON_MAX_LEN = 500
+
+
+@dataclass(slots=True)
+class FailedPacket:
+    """Пакет, который воркер не смог записать (после ретраев или без них)."""
+    at: datetime
+    topic: str
+    attempts: int
+    reason: str
+
 
 @dataclass(slots=True)
 class HealthState:
@@ -34,9 +48,23 @@ class HealthState:
     worker_tasks: tuple[asyncio.Task[Any], ...] = field(default_factory=tuple)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_write_at: datetime | None = None
+    # Незаписанные пакеты с момента запуска процесса (в памяти, сброс при рестарте)
+    failed_total: int = 0
+    failed_recent: deque[FailedPacket] = field(
+        default_factory=lambda: deque(maxlen=FAILED_RECENT_MAX),
+    )
 
     def mark_write(self) -> None:
         self.last_write_at = datetime.now(timezone.utc)
+
+    def mark_failed(self, topic: str, attempts: int, exc: BaseException) -> None:
+        reason = f"{type(exc).__name__}: {exc}"
+        if len(reason) > _FAILED_REASON_MAX_LEN:
+            reason = reason[:_FAILED_REASON_MAX_LEN] + "…"
+        self.failed_total += 1
+        self.failed_recent.append(
+            FailedPacket(datetime.now(timezone.utc), topic, attempts, reason),
+        )
 
 
 def _age_sec(ts: datetime) -> float:
@@ -75,12 +103,36 @@ def _payload(state: HealthState) -> dict[str, Any]:
         "last_write_ago_sec": round(last_write_ago_sec, 1),
         "workers_alive": workers_alive,
         "db_pool_size": _pool_size(),
+        "failed_packets_total": state.failed_total,
+    }
+
+
+def _failed_payload(state: HealthState) -> dict[str, Any]:
+    """Незаписанные пакеты: счётчик с момента запуска и последние N (новые первыми)."""
+    return {
+        "total": state.failed_total,
+        "since": state.started_at.isoformat(),
+        "recent_max": FAILED_RECENT_MAX,
+        "recent": [
+            {
+                "at": f.at.isoformat(),
+                "topic": f.topic,
+                "attempts": f.attempts,
+                "reason": f.reason,
+            }
+            for f in reversed(state.failed_recent)
+        ],
     }
 
 
 async def _handle_health(request: web.Request) -> web.Response:
     state: HealthState = request.app["state"]
     return web.json_response(_payload(state))
+
+
+async def _handle_failed(request: web.Request) -> web.Response:
+    state: HealthState = request.app["state"]
+    return web.json_response(_failed_payload(state))
 
 
 async def health_loop(
@@ -91,6 +143,7 @@ async def health_loop(
     app = web.Application(client_max_size=4 * 1024 * 1024)  # 4 MB для загрузки конфига
     app["state"] = state
     app.router.add_get("/health", _handle_health)
+    app.router.add_get("/health/failed", _handle_failed)
 
     if extra_setup is not None:
         extra_setup(app)

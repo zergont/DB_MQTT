@@ -8,7 +8,7 @@
 # без письменного разрешения правообладателя запрещено.
 
 """Запись пакетов decoded: 32-битные «нет данных», raw вне int4,
-состояние в памяти после commit, ретраи воркера.
+состояние в памяти после commit, ретраи воркера, учёт незаписанных пакетов.
 
 Слой src.db подменяется FakeDB: таблицы в памяти, транзакция откатывается
 при исключении, raw вне int4 даёт asyncpg.DataError — как в PostgreSQL.
@@ -33,7 +33,7 @@ import asyncpg
 from src import db, handlers, register_map
 from src import main as app
 from src.config import AppConfig
-from src.health import HealthState
+from src.health import FAILED_RECENT_MAX, HealthState, _failed_payload
 from src.history_policy import resolve_params, should_write
 
 # Без настроенного логирования WARNING ушли бы в stderr через lastResort
@@ -425,22 +425,23 @@ class DataErrorTests(unittest.IsolatedAsyncioTestCase):
 
 class WorkerRetryTests(unittest.IsolatedAsyncioTestCase):
 
-    async def run_worker(self, side_effect) -> mock.AsyncMock:
+    async def run_worker(self, side_effect) -> tuple[mock.AsyncMock, HealthState]:
         cfg = AppConfig()
         cfg.ingest.worker_retry_delay_sec = 0
         q_tel: asyncio.Queue = asyncio.Queue()
         q_dec: asyncio.Queue = asyncio.Queue()
         q_dec.put_nowait(app._IngestItem(TOPIC, b"{}", datetime.now(timezone.utc)))
+        health = HealthState()
 
         dispatch = mock.AsyncMock(side_effect=side_effect)
         with mock.patch.object(app, "dispatch", dispatch):
-            task = asyncio.create_task(app._worker_loop(1, cfg, q_tel, q_dec, HealthState()))
+            task = asyncio.create_task(app._worker_loop(1, cfg, q_tel, q_dec, health))
             try:
                 await asyncio.wait_for(q_dec.join(), timeout=2)
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-        return dispatch
+        return dispatch, health
 
     async def test_data_error_is_not_retried(self):
         for exc in (
@@ -449,13 +450,64 @@ class WorkerRetryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(exc=type(exc).__name__):
                 with self.assertLogs("cg.main", level="ERROR") as logs:
-                    dispatch = await self.run_worker(exc)
+                    dispatch, health = await self.run_worker(exc)
                 self.assertEqual(dispatch.await_count, 1)
                 self.assertIn("no retry", "\n".join(logs.output))
 
+                self.assertEqual(health.failed_total, 1)
+                failed = health.failed_recent[-1]
+                self.assertEqual((failed.topic, failed.attempts), (TOPIC, 1))
+                self.assertIn(type(exc).__name__, failed.reason)
+
     async def test_transient_error_is_retried(self):
-        dispatch = await self.run_worker([ConnectionResetError("db restart"), None])
+        dispatch, health = await self.run_worker([ConnectionResetError("db restart"), None])
         self.assertEqual(dispatch.await_count, 2)
+        self.assertEqual(health.failed_total, 0)
+
+    async def test_failure_after_retries_is_recorded(self):
+        with self.assertLogs("cg.main", level="ERROR"):
+            dispatch, health = await self.run_worker(ConnectionResetError("db down"))
+        self.assertEqual(dispatch.await_count, 4)       # 1 попытка + 3 ретрая
+        self.assertEqual(health.failed_total, 1)
+        failed = health.failed_recent[-1]
+        self.assertEqual(failed.attempts, 4)
+        self.assertEqual(failed.reason, "ConnectionResetError: db down")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Незаписанные пакеты в health (/health/failed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FailedPacketsHealthTests(unittest.TestCase):
+
+    def test_payload_newest_first(self):
+        health = HealthState()
+        health.mark_failed("t/1", 4, ConnectionResetError("first"))
+        health.mark_failed("t/2", 1, handlers.PacketDataError("second"))
+
+        payload = _failed_payload(health)
+        self.assertEqual(payload["total"], 2)
+        self.assertEqual(payload["since"], health.started_at.isoformat())
+        self.assertEqual([f["topic"] for f in payload["recent"]], ["t/2", "t/1"])
+        self.assertEqual(payload["recent"][0]["reason"], "PacketDataError: second")
+        self.assertEqual(payload["recent"][1]["attempts"], 4)
+
+    def test_recent_is_bounded_total_is_not(self):
+        health = HealthState()
+        for i in range(FAILED_RECENT_MAX + 7):
+            health.mark_failed(f"t/{i}", 1, ValueError(str(i)))
+
+        payload = _failed_payload(health)
+        self.assertEqual(payload["total"], FAILED_RECENT_MAX + 7)
+        self.assertEqual(len(payload["recent"]), FAILED_RECENT_MAX)
+        self.assertEqual(payload["recent"][0]["topic"], f"t/{FAILED_RECENT_MAX + 6}")
+
+    def test_long_reason_truncated(self):
+        health = HealthState()
+        health.mark_failed("t", 1, ValueError("x" * 2000))
+        reason = health.failed_recent[-1].reason
+        self.assertLessEqual(len(reason), 501)
+        self.assertTrue(reason.endswith("…"))
 
 
 if __name__ == "__main__":

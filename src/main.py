@@ -281,6 +281,7 @@ async def _worker_loop(
                         "Worker-%d: dropped topic=%s (data error, no retry): %s",
                         worker_id, item.topic, e,
                     )
+                    health_state.mark_failed(item.topic, attempt + 1, e)
                     break
                 except Exception as e:
                     attempt += 1
@@ -289,6 +290,7 @@ async def _worker_loop(
                             "Worker-%d: failed topic=%s after %d retries",
                             worker_id, item.topic, ic.worker_max_retries,
                         )
+                        health_state.mark_failed(item.topic, attempt, e)
                         break
                     logger.warning(
                         "Worker-%d: error topic=%s (%s); retry in %.1fs (%d/%d)",

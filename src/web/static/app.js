@@ -19,12 +19,16 @@ let _dirty = false;
 
 // ── Инициализация ──────────────────────────────────────────────────────────
 
+const MONITOR_REFRESH_MS = 30000;
+
 document.addEventListener("DOMContentLoaded", async () => {
   await loadConfig();
   await loadHealth();
+  await loadFailed();
   await loadEquipment();
   initSectionToggles();
   initButtons();
+  setInterval(() => { loadHealth(); loadFailed(); }, MONITOR_REFRESH_MS);
 });
 
 // ── API ────────────────────────────────────────────────────────────────────
@@ -471,6 +475,81 @@ function showToast(msg, type) {
   toast.textContent = msg;
   requestAnimationFrame(() => toast.classList.add("show"));
   setTimeout(() => toast.classList.remove("show"), 3000);
+}
+
+// ── Незаписанные пакеты ───────────────────────────────────────────────────
+
+async function loadFailed() {
+  try {
+    const resp = await fetch("/health/failed");
+    if (!resp.ok) throw new Error(await resp.text());
+    renderFailed(await resp.json());
+  } catch (e) {
+    // Health недоступен — секция просто не обновится
+  }
+}
+
+function formatTs(iso) {
+  return new Date(iso).toLocaleString("ru-RU");
+}
+
+// cg/v1/decoded/SN/<sn>/<type>/<panel> → "<sn> / <type> / <panel>"
+function formatTopic(topic) {
+  const m = /^cg\/v1\/decoded\/SN\/([^/]+)\/([^/]+)\/(\d+)$/.exec(topic);
+  return m ? `${m[1]} / ${m[2]} / ${m[3]}` : topic;
+}
+
+function renderFailed(data) {
+  const badge = document.getElementById("failed-count");
+  badge.textContent = data.total;
+  badge.className = "badge " + (data.total ? "badge-dead" : "badge-ok");
+
+  const container = document.getElementById("body-failed");
+  container.replaceChildren();
+
+  const summary = document.createElement("p");
+  summary.className = "failed-summary";
+  summary.textContent = data.total
+    ? `Не записано с запуска сервиса (${formatTs(data.since)}): ${data.total}. ` +
+      `Показаны последние ${data.recent.length}.`
+    : `Все пакеты записаны с момента запуска сервиса (${formatTs(data.since)}).`;
+  container.appendChild(summary);
+  if (!data.recent.length) return;
+
+  const table = document.createElement("table");
+  table.className = "kpi-table failed-table";
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>Время</th>
+        <th>Роутер / тип / панель</th>
+        <th>Попыток</th>
+        <th>Причина</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const tbody = table.querySelector("tbody");
+  for (const f of data.recent) {
+    const tr = document.createElement("tr");
+    // textContent: topic и текст ошибки приходят извне, не вставляем как HTML
+    for (const [text, cls] of [
+      [formatTs(f.at), "failed-nowrap"],
+      [formatTopic(f.topic), "failed-topic"],
+      [String(f.attempts), "failed-nowrap"],
+      [f.reason, "failed-reason"],
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      td.className = cls;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  const scroll = document.createElement("div");
+  scroll.className = "table-scroll";
+  scroll.appendChild(table);
+  container.appendChild(scroll);
 }
 
 // ── Оборудование ──────────────────────────────────────────────────────────
