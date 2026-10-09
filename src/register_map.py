@@ -24,9 +24,14 @@ decoded-сообщений.
     "40400": {"name": "...", "unit": "fault_bitmap", "bits": {
         "0": {"name": "LowOilPressureShutdown", "severity": "shutdown"},
         ...
-    }}
+    }},
+    "input:30013": {"name": "...", "unit": "pcs"}
   }
 }
+
+Ключ holding-регистра — число, input-регистра — с префиксом "input:".
+В decoded addr приходит без префикса (input — 30000+смещение), поэтому
+в карте db-writer ключ — просто addr.
 """
 
 from __future__ import annotations
@@ -44,17 +49,41 @@ logger = logging.getLogger("cg.register_map")
 _maps: dict[str, dict[int, dict[str, Any]]] = {}
 
 
+_KEY_REG_TYPES = ("holding", "input")
+
+
+def _parse_addr_key(key: Any) -> int | None:
+    """Ключ карты ("40070", "input:30013", "holding:40070") → addr или None."""
+    reg_type, sep, addr_str = str(key).partition(":")
+    if not sep:
+        reg_type, addr_str = "holding", reg_type
+    if reg_type not in _KEY_REG_TYPES:
+        return None
+    try:
+        return int(addr_str)
+    except ValueError:
+        return None
+
+
 def update(device_type: str, payload: dict[str, Any]) -> None:
     """Обновить карту из распарсенного payload cg/v1/maps/<device_type>."""
     registers_raw = payload.get("registers") or {}
     registers: dict[int, dict[str, Any]] = {}
-    for addr_str, meta in registers_raw.items():
-        try:
-            addr = int(addr_str)
-        except (ValueError, TypeError):
-            logger.warning("register_map: bad addr key %r in %s", addr_str, device_type)
+    source_keys: dict[int, str] = {}
+    for key, meta in registers_raw.items():
+        addr = _parse_addr_key(key)
+        if addr is None:
+            logger.warning("register_map: bad addr key %r in %s", key, device_type)
+            continue
+        if addr in registers:
+            # input и holding с одним номером в decoded неразличимы
+            logger.warning(
+                "register_map: addr %d in %s: key %r collides with %r, keeping %r",
+                addr, device_type, key, source_keys[addr], source_keys[addr],
+            )
             continue
         registers[addr] = meta
+        source_keys[addr] = key
 
     _maps[device_type] = registers
     logger.info(
