@@ -32,9 +32,19 @@ logger = logging.getLogger("cg.handler")
 # Кэш GPS-фильтров: router_sn → GpsFilter
 _gps_filters: dict[str, GpsFilter] = {}
 
-# Кэш последней записи: (router_sn, equip_type, panel_id, addr) → datetime
+# Последняя запись регистра в history из пакета: (router_sn, equip_type, panel_id, addr)
+# → ts по часам роутера (как и метки строк history)
 _last_write_ts: dict[tuple[str, str, int, int], datetime] = {}
 _WRITE_TS_CACHE_WARN = 100_000
+
+# Последняя heartbeat-строка регистра → ts по часам роутера. Отдельно от
+# _last_write_ts: синтетическая строка не должна через min_interval
+# подавлять следующее настоящее изменение.
+_heartbeat_ts: dict[tuple[str, str, int, int], datetime] = {}
+
+# «Устоявшаяся» метка панели: (router_sn, equip_type, panel_id) → ts роутера,
+# до которой все пакеты панели уже записаны (см. _note_packet_ts)
+_panel_settled_ts: dict[tuple[str, str, int], datetime] = {}
 
 # ── Gap detection ───────────────────────────────────────────────────────────
 # Трекер на уровне оборудования (router_sn, equip_type, panel_id).
@@ -74,10 +84,11 @@ class _StateDelta:
     enum/fault как изменения и запишет открытие/закрытие периодов.
     """
 
-    __slots__ = ("packet_ts", "avg_interval", "fault_bits", "enum_states", "write_ts")
+    __slots__ = ("packet_ts", "settled_ts", "avg_interval", "fault_bits", "enum_states", "write_ts")
 
     def __init__(self) -> None:
         self.packet_ts:    dict[tuple[str, str, int], datetime] = {}
+        self.settled_ts:   dict[tuple[str, str, int], datetime | None] = {}   # None — сбросить
         self.avg_interval: dict[tuple[str, str, int], float] = {}
         self.fault_bits:   dict[tuple[str, str, int, int], set[int]] = {}
         self.enum_states:  dict[tuple[str, str, int, int], int | None] = {}
@@ -95,6 +106,11 @@ class _StateDelta:
 
     def apply(self) -> None:
         _last_packet_ts.update(self.packet_ts)
+        for ekey, settled in self.settled_ts.items():
+            if settled is None:
+                _panel_settled_ts.pop(ekey, None)
+            else:
+                _panel_settled_ts[ekey] = settled
         _avg_interval.update(self.avg_interval)
         _active_fault_bits.update(self.fault_bits)
         _active_enum_states.update(self.enum_states)
@@ -118,10 +134,10 @@ def get_gps_filter(router_sn: str, cfg: AppConfig) -> GpsFilter:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def restore_write_timestamps() -> None:
-    """При старте загрузить _last_write_ts из history."""
+    """При старте загрузить _last_write_ts из history (ts — часы роутера)."""
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT router_sn, equip_type, panel_id, addr, max(received_at) AS last_ts "
+            "SELECT router_sn, equip_type, panel_id, addr, max(ts) AS last_ts "
             "FROM history GROUP BY router_sn, equip_type, panel_id, addr"
         )
         for r in rows:
@@ -388,6 +404,21 @@ async def _check_equipment_gap(
     delta.packet_ts[ekey] = ts
 
 
+def _note_packet_ts(ekey: tuple[str, str, int], ts: datetime, delta: _StateDelta) -> None:
+    """Обновить «устоявшуюся» метку панели — до неё все пакеты уже записаны.
+
+    Блоки одного цикла опроса приходят с одной меткой роутера и доходят до
+    записи с разбросом: пока виден последний ts, часть его блоков может быть
+    ещё в пути. Предыдущая отличная метка надёжна — пакеты панели
+    обрабатываются по порядку одним воркером. Пакет «назад» (не по порядку
+    или часы роутера отскочили) — сброс, метка появится со следующим циклом.
+    """
+    latest = _last_packet_ts.get(ekey)
+    if latest is None or ts == latest:
+        return
+    delta.settled_ts[ekey] = latest if ts > latest else None
+
+
 async def _handle_decoded(
     router_sn: str,
     equip_type: str,
@@ -441,6 +472,7 @@ async def _handle_decoded(
             await _check_equipment_gap(
                 conn, router_sn, equip_type, panel_id, ts, cfg.gap_detector, delta,
             )
+            _note_packet_ts(pkt, ts, delta)
 
             prev_map = await db.get_latest_state_rows_many(
                 conn, router_sn, equip_type, panel_id, addrs,
@@ -639,6 +671,8 @@ def _process_register(
 
     params = resolve_params(cfg, equip_type, addr, map_unit, kpi_map)
     key    = (router_sn, equip_type, panel_id, addr)
+    # Интервалы — по часам роутера (ts пакета), как и метки строк history:
+    # серверное время приёма пачки ничего не говорит о моменте показания
     last_ts = _last_write_ts.get(key)
 
     if params.register_kind == "enum":
@@ -647,12 +681,12 @@ def _process_register(
             params,
             new_value=dec_value, new_raw=raw_val,
             prev_value=prev_value, prev_raw=prev_raw,
-            last_write_ts=last_ts, now=now,
+            last_write_ts=last_ts, now=ts,
             use_heartbeat=False,
         )
         if decision.write:
             history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
-            delta.write_ts[key] = now
+            delta.write_ts[key] = ts
 
         # enum_history: открываем/закрываем периоды состояния
         ekey = (router_sn, equip_type, panel_id, addr)
@@ -670,12 +704,12 @@ def _process_register(
             params,
             new_value=dec_value, new_raw=raw_val,
             prev_value=prev_value, prev_raw=prev_raw,
-            last_write_ts=last_ts, now=now,
+            last_write_ts=last_ts, now=ts,
             use_heartbeat=True,
         )
         if decision.write:
             history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
-            delta.write_ts[key] = now
+            delta.write_ts[key] = ts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -768,6 +802,12 @@ def _update_last_write_ts(key: tuple, ts: datetime) -> None:
 # трафика). Событийный heartbeat в _process_register в этом случае не
 # срабатывает: нет сообщения — нет записи. Пока панель живая (пакеты
 # приходят), дописываем последнее известное значение аналоговых регистров.
+#
+# Метка строки — «устоявшаяся» метка пакетов панели (часы роутера), а не
+# время сервера: если от панели пришли пакеты до момента T без регистра,
+# его значение держалось до T. Пачки доходят с задержкой 1–25 с, и метка
+# сервера обгоняла бы ещё не доставленные показания — на пуске в history
+# появлялся «0 со стоянки» между рабочими значениями.
 
 async def heartbeat_flush_loop(
     cfg: AppConfig,
@@ -798,42 +838,56 @@ async def _heartbeat_flush_once(
     now = datetime.now(timezone.utc)
     alive_sec = cfg.history_policy.heartbeat_source_alive_sec
 
-    alive_panels = {
-        pkey for pkey, seen in panel_last_seen.items()
-        if (now - seen).total_seconds() <= alive_sec
-    }
-    if not alive_panels:
+    # Живые панели (приём по часам сервера) → устоявшаяся метка (часы роутера)
+    settled: dict[tuple[str, str, int], datetime] = {}
+    for pkey, seen in panel_last_seen.items():
+        if (now - seen).total_seconds() > alive_sec:
+            continue
+        pts = _panel_settled_ts.get(pkey)
+        if pts is not None:
+            settled[pkey] = pts
+    if not settled:
         return
 
-    # Аналоговые регистры живых панелей, по которым давно не было записи
+    # Аналоговые регистры, у которых к устоявшейся метке панели прошло
+    # heartbeat_sec с последней строки в history (всё — по часам роутера)
     stale: dict[tuple[str, str, int], list[int]] = {}
-    for (sn, et, pid, addr), wts in _last_write_ts.items():
-        if (sn, et, pid) not in alive_panels:
+    for key, wts in _last_write_ts.items():
+        pkey = key[:3]
+        pts = settled.get(pkey)
+        if pts is None:
             continue
+        sn, et, pid, addr = key
         params = resolve_params(cfg, et, addr, register_map.get_unit(et, addr), kpi_map)
         if params.register_kind != "analog" or not params.store_history:
             continue
-        if (now - wts).total_seconds() < params.heartbeat_sec:
+        last = max(wts, _heartbeat_ts.get(key, wts))
+        if (pts - last).total_seconds() < params.heartbeat_sec:
             continue
-        stale.setdefault((sn, et, pid), []).append(addr)
+        stale.setdefault(pkey, []).append(addr)
 
     if not stale:
         return
 
     written = 0
     async with db.pool().acquire() as conn:
-        for (sn, et, pid), addrs in stale.items():
+        for pkey, addrs in stale.items():
+            sn, et, pid = pkey
+            pts = settled[pkey]
             prev_map = await db.get_latest_state_rows_many(conn, sn, et, pid, addrs)
             batch: list[tuple] = []
             for addr in addrs:
                 prev = prev_map.get(addr)
                 if prev is None or prev["value"] is None:
                     continue
-                batch.append((sn, et, pid, addr, now, prev["value"], prev["raw"]))
+                # Значение снято позже метки — неизвестно, каким оно было на ней
+                if prev["ts"] is None or prev["ts"] > pts:
+                    continue
+                batch.append((sn, et, pid, addr, pts, prev["value"], prev["raw"]))
             await db.insert_history_batch(conn, batch)
-            # Время записи — только после успешной вставки
+            # Метка heartbeat — только после успешной вставки
             for row in batch:
-                _update_last_write_ts(row[:4], now)
+                _heartbeat_ts[row[:4]] = pts
             written += len(batch)
 
     if written:

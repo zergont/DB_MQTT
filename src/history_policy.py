@@ -112,9 +112,15 @@ def should_write(
     if not params.store_history:
         return WriteDecision(False)
 
+    # now и last_write_ts — по часам роутера (ts пакета)
     elapsed: float | None = None
     if last_write_ts is not None:
         elapsed = (now - last_write_ts).total_seconds()
+        # Метка раньше последней записи (пакет не по порядку или часы роутера
+        # отскочили назад) — считаем, что записи не было; иначе min_interval
+        # глушил бы запись, пока часы роутера не догонят прежнюю метку
+        if elapsed < 0:
+            elapsed = None
 
     # Минимальный интервал — защита от flood
     if elapsed is not None and elapsed < params.min_interval_sec:

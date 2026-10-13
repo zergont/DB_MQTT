@@ -83,7 +83,8 @@ class FakeDB:
     def __init__(self) -> None:
         self.t: dict = {
             "latest": {},     # addr → {"value", "raw"}
-            "history": [],    # (addr, value, raw)
+            "latest_ts": {},  # addr → ts строки latest_state
+            "history": [],    # (addr, value, raw, ts)
             "enum": [],       # {"addr", "value", "end"}
             "fault": [],      # {"addr", "bit", "end"}
             "gaps": [],
@@ -157,18 +158,22 @@ class FakeDB:
 
     async def get_latest_state_rows_many(self, conn, router_sn, equip_type, panel_id, addrs):
         self._enter("get_latest_state_rows_many")
-        return {a: dict(self.t["latest"][a]) for a in addrs if a in self.t["latest"]}
+        return {
+            a: {**self.t["latest"][a], "ts": self.t["latest_ts"][a]}
+            for a in addrs if a in self.t["latest"]
+        }
 
     async def upsert_latest_state_batch(self, conn, rows):
         self._enter("upsert_latest_state_batch")
         self._check_int4(rows)
         for r in rows:
             self.t["latest"][r[3]] = {"value": r[5], "raw": r[6]}
+            self.t["latest_ts"][r[3]] = r[4]
 
     async def insert_history_batch(self, conn, rows):
         self._enter("insert_history_batch")
         self._check_int4(rows)
-        self.t["history"].extend((r[3], r[5], r[6]) for r in rows)
+        self.t["history"].extend((r[3], r[5], r[6], r[4]) for r in rows)
 
     async def insert_event_batch(self, conn, rows):
         self._enter("insert_event_batch")
@@ -203,6 +208,10 @@ class FakeDB:
     def history_for(self, addr: int) -> list[tuple]:
         return [h for h in self.t["history"] if h[0] == addr]
 
+    def series(self, addr: int) -> list[tuple[datetime, Decimal | None]]:
+        """(ts, value) регистра в порядке ts — как его видит график."""
+        return sorted((h[3], h[1]) for h in self.history_for(addr))
+
     def open_enum(self, addr: int) -> list[int]:
         return [e["value"] for e in self.t["enum"] if e["addr"] == addr and e["end"] is None]
 
@@ -222,7 +231,7 @@ class DecodedTestCase(unittest.IsolatedAsyncioTestCase):
         for state in (
             handlers._last_write_ts, handlers._last_packet_ts, handlers._avg_interval,
             handlers._active_fault_bits, handlers._active_enum_states,
-            handlers._raw_overflow_warned,
+            handlers._raw_overflow_warned, handlers._heartbeat_ts, handlers._panel_settled_ts,
         ):
             state.clear()
 
@@ -257,7 +266,7 @@ class NaAndOverflowTests(DecodedTestCase):
         await self.handle(packet(na_reg(ADDR_HOURS, raw), *normal_regs()))
 
         self.assertEqual(self.fake.t["latest"][ADDR_HOURS], {"value": None, "raw": None})
-        self.assertEqual(self.fake.history_for(ADDR_HOURS), [(ADDR_HOURS, None, None)])
+        self.assertEqual([h[:3] for h in self.fake.history_for(ADDR_HOURS)], [(ADDR_HOURS, None, None)])
         self.assert_normal_regs_written()
 
     async def test_na_u32_fffffffc_packet_written(self):
@@ -297,9 +306,12 @@ class NaAndOverflowTests(DecodedTestCase):
         self.assertEqual(self.fake.t["latest"][ADDR_PRESSURE]["raw"], -2**31)
 
     async def test_history_change_detected_by_value_when_raw_null(self):
-        await self.handle(packet(reg(ADDR_HOURS, 316_800_000.0, 3_168_000_000)))
-        await self.handle(packet(reg(ADDR_HOURS, 316_800_000.0, 3_168_000_000)))   # без изменений
-        await self.handle(packet(reg(ADDR_HOURS, 316_800_036.0, 3_168_000_360)))   # +36 с
+        await self.handle(packet(reg(ADDR_HOURS, 316_800_000.0, 3_168_000_000),
+                                 ts="2026-10-09T12:00:00+00:00"))
+        await self.handle(packet(reg(ADDR_HOURS, 316_800_000.0, 3_168_000_000),   # без изменений
+                                 ts="2026-10-09T12:00:09+00:00"))
+        await self.handle(packet(reg(ADDR_HOURS, 316_800_036.0, 3_168_000_360),   # +36 с
+                                 ts="2026-10-09T12:00:18+00:00"))
 
         self.assertEqual(
             [h[1] for h in self.fake.history_for(ADDR_HOURS)],
