@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+import statistics
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -52,6 +53,12 @@ _panel_settled_ts: dict[tuple[str, str, int], datetime] = {}
 
 _last_packet_ts: dict[tuple[str, str, int], datetime] = {}
 _avg_interval:   dict[tuple[str, str, int], float] = {}
+
+# Восстановление при старте: окно history и число последних меток панели
+_GAP_RESTORE_DAYS = 1
+_GAP_RESTORE_SAMPLES = 51
+# Порог, пока средний интервал панели неизвестен (см. _check_equipment_gap)
+_GAP_UNKNOWN_AVG_THRESHOLD_SEC = _GAP_RESTORE_DAYS * 86400
 
 # Кэш активных fault-битов: (router_sn, equip_type, panel_id, addr) → set of bit numbers
 _active_fault_bits: dict[tuple[str, str, int, int], set[int]] = {}
@@ -173,16 +180,49 @@ async def restore_enum_states() -> None:
 
 
 async def restore_gap_tracker() -> None:
-    """При старте — только информационный лог.
+    """При старте восстановить gap-детектор по history (часы роутера).
+
+    Без этого первый пакет после рестарта не с чем сравнить: молчание
+    панели, начавшееся до рестарта, не попадало в data_gaps (ДЭС №3,
+    13–14.10: рестарт во время 8-часового обрыва).
+
+    - _last_packet_ts — последняя метка пакета панели;
+    - _avg_interval — медиана интервалов между последними метками
+      (устойчива к разрывам внутри выборки).
+    Панели, молчащие дольше окна выборки: метка — из _last_write_ts
+    (вызывать после restore_write_timestamps), среднее неизвестно.
 
     Открытые gap'ы (gap_end IS NULL) закрываются безусловно при получении
-    следующего нормального пакета для того же оборудования (см.
-    _check_equipment_gap), независимо от того, помнит ли о них текущий
-    процесс — поэтому отдельный in-memory трекер открытых gap'ов не нужен.
+    следующего нормального пакета (см. _check_equipment_gap) — отдельный
+    in-memory трекер открытых gap'ов не нужен.
     """
     async with db.pool().acquire() as conn:
         gap_rows = await db.get_open_gaps(conn)
-    logger.info("Gap tracker startup: %d open gap(s) in DB", len(gap_rows))
+        recent = await db.get_recent_packet_ts(
+            conn, days=_GAP_RESTORE_DAYS, per_panel=_GAP_RESTORE_SAMPLES,
+        )
+
+    by_panel: dict[tuple[str, str, int], list[datetime]] = {}
+    for r in recent:
+        by_panel.setdefault((r["router_sn"], r["equip_type"], r["panel_id"]), []).append(r["ts"])
+    for ekey, stamps in by_panel.items():
+        stamps.sort()
+        _last_packet_ts[ekey] = stamps[-1]
+        intervals = [(b - a).total_seconds() for a, b in zip(stamps, stamps[1:])]
+        if intervals:
+            _avg_interval[ekey] = statistics.median(intervals)
+
+    for (sn, et, pid, _addr), wts in _last_write_ts.items():
+        ekey = (sn, et, pid)
+        if ekey in by_panel:
+            continue
+        if ekey not in _last_packet_ts or wts > _last_packet_ts[ekey]:
+            _last_packet_ts[ekey] = wts
+
+    logger.info(
+        "Gap tracker restored: %d panel(s) (%d with interval), %d open gap(s) in DB",
+        len(_last_packet_ts), len(_avg_interval), len(gap_rows),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,9 +415,14 @@ async def _check_equipment_gap(
         avg = _avg_interval.get(ekey)
 
         if avg is None:
-            delta.avg_interval[ekey] = elapsed
-            avg = elapsed
-            is_gap = False
+            # Среднее неизвестно: первый интервал новой панели или старт без
+            # её меток за окно восстановления (молчала дольше). Разрыв — только
+            # пауза длиннее окна (иначе панель с редкими пакетами рвалась бы на
+            # каждом интервале); среднее задаёт первый нормальный интервал.
+            threshold = float(_GAP_UNKNOWN_AVG_THRESHOLD_SEC)
+            is_gap = elapsed > threshold
+            if not is_gap:
+                delta.avg_interval[ekey] = elapsed
         else:
             threshold = max(avg * gap_cfg.multiplier, float(gap_cfg.min_threshold_sec))
             is_gap = elapsed > threshold
@@ -387,8 +432,9 @@ async def _check_equipment_gap(
         if is_gap:
             gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
             logger.info(
-                "GAP opened id=%d %s/%s/%d: elapsed=%.0fs threshold=%.0fs avg=%.0fs",
-                gap_id, router_sn, equip_type, panel_id, elapsed, threshold, avg,
+                "GAP opened id=%d %s/%s/%d: elapsed=%.0fs threshold=%.0fs avg=%s",
+                gap_id, router_sn, equip_type, panel_id, elapsed, threshold,
+                "n/a" if avg is None else f"{avg:.0f}s",
             )
 
         # Безусловно: закрыть любой открытый gap (gap_end IS NULL) для этого

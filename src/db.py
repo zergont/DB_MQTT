@@ -346,6 +346,37 @@ async def get_open_gaps(conn: asyncpg.Connection) -> list[asyncpg.Record]:
     )
 
 
+async def get_recent_packet_ts(
+    conn: asyncpg.Connection,
+    days: int,
+    per_panel: int,
+) -> list[asyncpg.Record]:
+    """Последние метки пакетов каждой панели за days суток (часы роутера).
+
+    Метки роутера — целые секунды; строки с дробной секундой — heartbeat
+    до 2.7.2 (время сервера), их пропускаем.
+    """
+    return await conn.fetch(
+        """
+        SELECT router_sn, equip_type, panel_id, ts
+        FROM (
+            SELECT router_sn, equip_type, panel_id, ts,
+                   row_number() OVER (
+                       PARTITION BY router_sn, equip_type, panel_id ORDER BY ts DESC
+                   ) AS rn
+            FROM (
+                SELECT DISTINCT router_sn, equip_type, panel_id, ts
+                FROM history
+                WHERE ts > now() - make_interval(days => $1)
+                  AND ts = date_trunc('second', ts)
+            ) t
+        ) r
+        WHERE rn <= $2
+        """,
+        days, per_panel,
+    )
+
+
 async def get_last_packet_times(conn: asyncpg.Connection) -> list[asyncpg.Record]:
     """Последнее время пакета для каждого оборудования (equipment.last_seen_at)."""
     return await conn.fetch(

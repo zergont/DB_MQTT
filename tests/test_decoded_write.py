@@ -78,6 +78,7 @@ class FakeDB:
         "insert_history_batch", "insert_event_batch",
         "open_enum_state_batch", "close_enum_states_batch",
         "open_fault_batch", "close_faults_batch",
+        "get_open_gaps", "get_recent_packet_ts",
     )
 
     def __init__(self) -> None:
@@ -91,6 +92,7 @@ class FakeDB:
             "events": [],
         }
         self.fail_once: set[str] = set()   # имена функций, которые упадут один раз
+        self.window_end: datetime | None = None   # «сейчас» для окна get_recent_packet_ts
         self.calls: list[str] = []
 
     # ── транзакции ──────────────────────────────────────────────────────────
@@ -155,6 +157,19 @@ class FakeDB:
                 g["end"] = gap_end
                 n += 1
         return n
+
+    async def get_open_gaps(self, conn):
+        self._enter("get_open_gaps")
+        return [g for g in self.t["gaps"] if g["end"] is None]
+
+    async def get_recent_packet_ts(self, conn, days, per_panel):
+        self._enter("get_recent_packet_ts")
+        stamps = sorted({h[3] for h in self.t["history"] if h[3].microsecond == 0})
+        if not stamps:
+            return []
+        end = self.window_end or stamps[-1]
+        stamps = [t for t in stamps if t > end - timedelta(days=days)][-per_panel:]
+        return [{"router_sn": SN, "equip_type": ET, "panel_id": PID, "ts": t} for t in stamps]
 
     async def get_latest_state_rows_many(self, conn, router_sn, equip_type, panel_id, addrs):
         self._enter("get_latest_state_rows_many")
