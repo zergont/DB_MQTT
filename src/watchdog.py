@@ -33,6 +33,7 @@ async def watchdog_loop(
     cfg: AppConfig,
     last_seen: dict[str, datetime],
     panel_last_seen: dict[tuple[str, str, int], datetime],
+    panel_last_live: dict[tuple[str, str, int], datetime],
 ) -> None:
     """Бесконечный цикл проверки stale/offline."""
     interval = cfg.events_policy.check_interval_sec
@@ -41,7 +42,7 @@ async def watchdog_loop(
     while True:
         await asyncio.sleep(interval)
         try:
-            await _check(cfg, last_seen, panel_last_seen)
+            await _check(cfg, last_seen, panel_last_seen, panel_last_live)
         except Exception:
             logger.exception("Watchdog check error")
 
@@ -50,7 +51,12 @@ async def _check(
     cfg: AppConfig,
     last_seen: dict[str, datetime],
     panel_last_seen: dict[tuple[str, str, int], datetime],
+    panel_last_live: dict[tuple[str, str, int], datetime],
 ) -> None:
+    """panel_last_seen — любая пачка decoded, panel_last_live — живая
+    (не ts_status=late). Из stale/offline в online панель возвращает только
+    живая пачка; запоздалые лишь не дают уйти в offline той, что на связи.
+    """
     now = datetime.now(timezone.utc)
     ep = cfg.events_policy
 
@@ -81,6 +87,11 @@ async def _check(
             new_state = "stale"
         else:
             new_state = "online"
+
+        if new_state == "online" and prev != "online":
+            live = panel_last_live.get((router_sn, equip_type, panel_id))
+            if live is None or (now - live).total_seconds() >= ep.panel_stale_sec:
+                continue
 
         if new_state != prev:
             await _emit_panel_event(router_sn, equip_type, panel_id, prev, new_state)

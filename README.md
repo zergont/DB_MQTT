@@ -423,6 +423,8 @@ ORDER BY created_at DESC LIMIT 10;
 
 4. Возобновите публикацию — должен появиться event `router_online`.
 
+`panel_online` после `panel_stale_sec`/`panel_offline_sec` молчания поднимает только живая пачка decoded. Запоздалая (`ts_status=late` — застрявшее сообщение после обрыва) держит на связи панель, которая и так online, но вернуть в online не может. На `router_online` это не влияет.
+
 ### Проверка retention
 
 Retention управляется автоматически через **TimescaleDB Retention Policies** — вручную запускать ничего не нужно. Политики устанавливаются при `setup_db.py` и работают как фоновые задания TimescaleDB.

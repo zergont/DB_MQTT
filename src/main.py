@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -51,6 +52,9 @@ logger = logging.getLogger("cg.main")
 # Shared state для watchdog
 _last_seen: dict[str, datetime] = {}
 _panel_last_seen: dict[tuple[str, str, int], datetime] = {}
+# Последняя живая пачка панели (не ts_status=late): только она возвращает
+# панель в online (см. watchdog._check)
+_panel_last_live: dict[tuple[str, str, int], datetime] = {}
 
 
 @dataclass(slots=True)
@@ -60,10 +64,23 @@ class _IngestItem:
     received_at: datetime
 
 
-def _touch_last_seen(topic: str) -> None:
+def _is_late(payload: bytes) -> bool:
+    """Пачка decoded помечена декодером как запоздалая (ts_status=late)."""
+    if b'"late"' not in payload:     # почти все пачки живые — без разбора JSON
+        return False
+    try:
+        return json.loads(payload).get("ts_status") == "late"
+    except (ValueError, AttributeError):
+        return False
+
+
+def _touch_last_seen(topic: str, payload: bytes = b"") -> None:
     """Обновить last_seen при получении сообщения (не при записи в БД).
 
     Watchdog должен видеть живое устройство даже если БД тормозит.
+    Запоздалая пачка decoded держит панель живой, но в _panel_last_live
+    не попадает: застрявшее сообщение после обрыва (ДЭС №3 24.10, метка
+    11:48:09 дошла в 12:38:28) не значит, что связь восстановлена.
     """
     now = datetime.now(timezone.utc)
     parts = topic.split("/")
@@ -80,9 +97,12 @@ def _touch_last_seen(topic: str) -> None:
         _last_seen[sn] = now
         try:
             panel_id = int(parts[6])
-            _panel_last_seen[(sn, equip_type, panel_id)] = now
         except ValueError:
-            pass
+            return
+        pkey = (sn, equip_type, panel_id)
+        _panel_last_seen[pkey] = now
+        if not _is_late(payload):
+            _panel_last_live[pkey] = now
 
 
 def _decoded_shard_key(topic: str) -> tuple[str, str, int] | None:
@@ -201,7 +221,7 @@ async def _mqtt_ingest_loop(
                     if not isinstance(payload, bytes):
                         payload = str(payload).encode()
 
-                    _touch_last_seen(topic)
+                    _touch_last_seen(topic, payload)
 
                     item = _IngestItem(
                         topic=topic,
@@ -329,7 +349,8 @@ async def _run(cfg: AppConfig, config_path: Path) -> None:
 
         tasks: list[asyncio.Task] = [
             asyncio.create_task(_mqtt_ingest_loop(cfg, q_telemetry, q_decoded_shards), name="mqtt_ingest"),
-            asyncio.create_task(watchdog_loop(cfg, _last_seen, _panel_last_seen),  name="watchdog"),
+            asyncio.create_task(watchdog_loop(cfg, _last_seen, _panel_last_seen, _panel_last_live),
+                                name="watchdog"),
             asyncio.create_task(heartbeat_flush_loop(cfg, _panel_last_seen), name="heartbeat_flush"),
         ]
 
