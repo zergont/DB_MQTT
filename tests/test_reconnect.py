@@ -244,6 +244,71 @@ class LatestStateGuardTests(ReconnectTestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Первый кадр enum/масок после разрыва пишется и без изменения
+# ─────────────────────────────────────────────────────────────────────────────
+
+MASK_AT = UP + 171      # 24.10: маски пришли через 2 мин 51 с после остальных
+
+
+class FirstFrameAfterGapTests(ReconnectTestCase):
+
+    def enum(self, value: int) -> dict:
+        return reg(ADDR_ENUM, value, value)
+
+    def mask(self, *bits: int) -> dict:
+        raw = sum(1 << b for b in bits)
+        return reg(ADDR_FAULT, {"faults": [{"bit": b} for b in bits]}, raw)
+
+    async def outage(self) -> None:
+        await self.pkt(0, self.enum(1), self.mask(7))
+        await self.counters(9, DOWN)
+
+    async def test_unchanged_frame_after_gap_written_once(self):
+        await self.outage()
+        await self.pkt(UP, self.enum(1))                 # enum — в первом срезе
+        await self.pkt(UP + 9, self.enum(1))
+        await self.pkt(MASK_AT, self.mask(7))            # маски — позже
+        await self.pkt(MASK_AT + 9, self.mask(7))
+
+        self.assertEqual(self.series(ADDR_ENUM), [(0, Decimal(1)), (UP, Decimal(1))])
+        self.assertEqual(self.series(ADDR_FAULT), [(0, Decimal(128)), (MASK_AT, Decimal(128))])
+        # периоды не тронуты: бит 7 горит с 0, состояние 1 — с 0
+        fault = [(f["bit"], f["start"], f["end"]) for f in self.fake.t["fault"]]
+        self.assertEqual(fault, [(7, at(0), None)])
+        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [1])
+        self.assertEqual(len(self.fake.t["enum"]), 1)
+
+    async def test_no_extra_rows_without_gap(self):
+        await self.pkt(0, self.enum(1), self.mask(7))
+        for sec in range(9, 200, 9):
+            await self.pkt(sec, self.enum(1), self.mask(7))
+        self.assertEqual(len(self.series(ADDR_ENUM)), 1)
+        self.assertEqual(len(self.series(ADDR_FAULT)), 1)
+
+    async def test_changed_frame_after_gap_written_once(self):
+        await self.outage()
+        await self.pkt(MASK_AT, self.mask(2))            # 40406: бит 2 вместо 7
+        self.assertEqual(self.series(ADDR_FAULT), [(0, Decimal(128)), (MASK_AT, Decimal(4))])
+        fault = [(f["bit"], f["start"], f["end"]) for f in self.fake.t["fault"]]
+        self.assertEqual(fault, [(7, at(0), at(MASK_AT)), (2, at(MASK_AT), None)])
+
+    async def test_after_restart(self):
+        await self.outage()
+        await self.counter(UP)
+        await self.restart()                             # маски ещё не пришли
+        await self.pkt(MASK_AT, self.mask(7))
+        self.assertEqual(self.series(ADDR_FAULT), [(0, Decimal(128)), (MASK_AT, Decimal(128))])
+
+    async def test_no_timer_heartbeat_for_masks(self):
+        await self.outage()
+        await self.pkt(UP, self.enum(1), self.mask(7))
+        await self.counters(UP + 9, UP + 300)
+        await self.flush()
+        self.assertEqual([s for s, _ in self.series(ADDR_ENUM)], [0, UP])
+        self.assertEqual([s for s, _ in self.series(ADDR_FAULT)], [0, UP])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Сценарий 24.10 целиком
 # ─────────────────────────────────────────────────────────────────────────────
 

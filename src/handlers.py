@@ -518,6 +518,24 @@ def _note_packet_ts(ekey: tuple[str, str, int], ts: datetime, delta: _StateDelta
     delta.settled_ts[ekey] = latest if ts > latest else None
 
 
+def _first_after_gap(
+    key: tuple[str, str, int, int],
+    last_write_ts: datetime | None,
+    delta: _StateDelta,
+) -> bool:
+    """Первый кадр enum/fault_bitmap после разрыва связи панели.
+
+    Пишется в history и без изменения: иначе не видно, что значение после
+    связи вообще пришло (ДЭС №3 24.10: маски — через 2 мин 51 с после
+    остальных регистров, неизменные — не видны совсем). Признак — последняя
+    строка регистра в history раньше конца разрыва. Таймерного heartbeat
+    для них нет.
+    """
+    ekey = key[:3]
+    gap_end = delta.gap_end.get(ekey, _panel_gap_end.get(ekey))
+    return gap_end is not None and last_write_ts is not None and last_write_ts < gap_end
+
+
 async def _handle_decoded(
     router_sn: str,
     equip_type: str,
@@ -684,7 +702,8 @@ def _process_fault_bitmap(
     """Обработка fault bitmap регистра.
 
     - Открываем/закрываем fault-биты в fault_history.
-    - В history пишем raw (16-бит маска) при изменении.
+    - В history пишем raw (16-бит маска) при изменении и первый кадр после
+      разрыва связи (см. _first_after_gap).
     - name/severity живут в cg/v1/maps/<device_type>, не в БД.
     - В events пишем только {addr, bit}.
     - Пакет из прошлого (past): только строка history на его метке.
@@ -732,8 +751,9 @@ def _process_fault_bitmap(
     prev = prev_map.get(addr)
     prev_raw = prev["raw"] if prev else None
 
-    if raw_val != prev_raw:
+    if raw_val != prev_raw or _first_after_gap(fkey, _last_write_ts.get(fkey), delta):
         history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_raw, raw_val))
+        delta.write_ts[fkey] = ts
 
     # latest_state
     latest_rows_map[addr] = (router_sn, equip_type, panel_id, addr, ts, dec_raw, raw_val)
@@ -813,7 +833,7 @@ def _process_register(
             last_write_ts=last_ts, now=ts,
             use_heartbeat=False,
         )
-        if decision.write:
+        if decision.write or (params.store_history and _first_after_gap(key, last_ts, delta)):
             history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
             delta.write_ts[key] = ts
 
