@@ -41,6 +41,7 @@ class GapRestoreTestCase(HeartbeatTestCase):
         for state in (
             handlers._last_packet_ts, handlers._avg_interval, handlers._panel_settled_ts,
             handlers._last_write_ts, handlers._heartbeat_ts,
+            handlers._last_packet_late, handlers._panel_gap_end,
         ):
             state.clear()
         handlers._last_write_ts.update(last_write)

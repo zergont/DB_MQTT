@@ -14,7 +14,8 @@
 - **latest_state** — фиксированный объём, всегда актуальный срез.
 - **history** — аналоговые регистры: только изменения (tolerance/deadband) + heartbeat. Дискретные/enum — только изменения, без heartbeat.
 - **events** — offline/online переходы, фолты. GPS reject и unknown_register отключены по умолчанию.
-- **Gap detection** — разрывы связи на уровне оборудования через `data_gaps`, не через heartbeat регистров.
+- **Gap detection** — разрывы связи на уровне оборудования через `data_gaps`, не через heartbeat регистров. Heartbeat не переносит значение через разрыв: снятое до обрыва не повторяется, пока регистр не придёт заново.
+- **Запоздалые пачки** (`ts_status=late` в decoded, декодер ≥ 2.3.0) — пачка с меткой раньше последней пишется только в `history`: `latest_state`, периоды enum/fault и трекер разрывов не откатываются. Одиночная запоздалая пачка внутри обрыва не делит разрыв на два (`gap_detector.merge_across_late`).
 - **GPS anti-teleport** — фильтрация скачков с confirm-буфером. Для стационарного оборудования GPS reject события можно отключить.
 - БД не раздувается: TimescaleDB retention + compression автоматически.
 
@@ -382,29 +383,30 @@ mosquitto_pub -t "cg/v1/decoded/SN/6003790403/pcc/1" -m '{
 ```
 
 ```sql
--- latest_state обновился для 3 регистров
-SELECT addr, name, value, raw, reason
+-- latest_state обновился для 40034; регистры с reason (ошибка декодирования)
+-- пропускаются целиком — 40062 и 49999 не пишутся ни в latest_state, ни в history
+SELECT addr, ts, value, raw, updated_at
 FROM latest_state
 WHERE router_sn = '6003790403' AND panel_id = 1;
 
--- history — должны быть записи (первый раз = change)
-SELECT addr, value, write_reason
+-- history — первая запись регистра пишется всегда (это изменение)
+SELECT addr, ts, value, raw, received_at
 FROM history
 WHERE router_sn = '6003790403' AND panel_id = 1
-ORDER BY id DESC LIMIT 10;
-
--- event для unknown register (только если enable_unknown_register_events=true, по умолчанию false)
-SELECT * FROM events WHERE type = 'unknown_register';
+ORDER BY ts DESC LIMIT 10;
 ```
 
-**Проверить heartbeat (аналоговые регистры):** подождите `heartbeat_sec` (60 сек для KPI) без изменения значений:
+**Проверить heartbeat (аналоговые регистры):** heartbeat повторяет последнее значение регистра раз в `heartbeat_sec` (60 с для KPI, 900 с по умолчанию), пока панель шлёт пакеты — не реже `heartbeat_source_alive_sec`. Метка строки — по часам роутера (последняя метка, до которой пакеты панели уже записаны). Одного `mosquitto_pub` для проверки мало: нужны пакеты панели с растущей меткой без проверяемого регистра.
 ```sql
-SELECT addr, write_reason, ts
+SELECT ts, value, received_at
 FROM history
-WHERE router_sn = '6003790403' AND addr IN (40034, 40062)
-ORDER BY id DESC LIMIT 10;
--- Должны появиться записи с write_reason='heartbeat'
--- Для дискретных/enum регистров heartbeat не пишется — только изменения
+WHERE router_sn = '6003790403' AND panel_id = 1 AND addr = 40034
+ORDER BY ts DESC LIMIT 10;
+-- Повтор того же value с шагом не меньше heartbeat_sec — это heartbeat.
+-- Отдельного признака у строки нет: столбец write_reason удалён.
+-- Для enum и fault_bitmap heartbeat не пишется — только изменения.
+-- Значение, снятое до разрыва связи (data_gaps), не повторяется,
+-- пока регистр не придёт от роутера заново.
 ```
 
 ### Проверка events (offline/online)
@@ -501,6 +503,7 @@ cg-db-writer/
 | `gps_filter` | Пороги anti-teleport (sats, fix, jump, speed, confirm) |
 | `history_policy` | Tolerance, min_interval, heartbeat, KPI регистры |
 | `events_policy` | Пороги stale/offline, включение GPS reject / unknown register events |
+| `gap_detector` | Порог разрыва связи (`data_gaps`), сшивание разрыва через запоздалую пачку |
 | `web_ui` | Включить/выключить веб-интерфейс |
 | `retention` | Информационные сроки хранения (TimescaleDB управляет автоматически) |
 | `logging` | Уровень, файл, JSON формат |

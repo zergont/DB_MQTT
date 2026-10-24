@@ -190,6 +190,12 @@ async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple])
     """Batch upsert latest_state.
 
     Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw)
+
+    Строка не откатывается к более старой метке (пакет пришёл не по порядку).
+    Исключение — метка в строке впереди часов сервера больше чем на 2 мин
+    (порог future декодера): часы роутера убегали вперёд (tz_shift в режиме
+    flag, offset_jump) и вернулись. Без него срез замёрз бы, пока время не
+    догонит убежавшую метку.
     """
     if not rows:
         return
@@ -203,6 +209,9 @@ async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple])
           value      = EXCLUDED.value,
           raw        = EXCLUDED.raw,
           updated_at = now()
+        WHERE latest_state.ts IS NULL
+           OR EXCLUDED.ts >= latest_state.ts
+           OR latest_state.ts > now() + interval '120 seconds'
         """,
         rows,
     )
@@ -333,6 +342,39 @@ async def close_data_gap(
     )
     # asyncpg returns "UPDATE N"
     return int(result.split()[-1])
+
+
+async def extend_data_gap(
+    conn: asyncpg.Connection,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    old_end: datetime,
+    new_end: datetime,
+) -> int:
+    """Продлить разрыв, закрытый меткой old_end, до new_end. Возвращает кол-во обновлённых."""
+    result = await conn.execute(
+        """
+        UPDATE data_gaps
+        SET gap_end = $5
+        WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+          AND gap_end = $4
+        """,
+        router_sn, equip_type, panel_id, old_end, new_end,
+    )
+    return int(result.split()[-1])
+
+
+async def get_last_gap_ends(conn: asyncpg.Connection) -> list[asyncpg.Record]:
+    """Конец последнего закрытого разрыва каждой панели (для восстановления при старте)."""
+    return await conn.fetch(
+        """
+        SELECT router_sn, equip_type, panel_id, max(gap_end) AS gap_end
+        FROM data_gaps
+        WHERE gap_end IS NOT NULL
+        GROUP BY router_sn, equip_type, panel_id
+        """
+    )
 
 
 async def get_open_gaps(conn: asyncpg.Connection) -> list[asyncpg.Record]:

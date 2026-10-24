@@ -73,12 +73,12 @@ class FakeDB:
 
     FUNCS = (
         "pool", "upsert_object", "upsert_equipment",
-        "insert_data_gap", "close_data_gap",
+        "insert_data_gap", "close_data_gap", "extend_data_gap",
         "get_latest_state_rows_many", "upsert_latest_state_batch",
         "insert_history_batch", "insert_event_batch",
         "open_enum_state_batch", "close_enum_states_batch",
         "open_fault_batch", "close_faults_batch",
-        "get_open_gaps", "get_recent_packet_ts",
+        "get_open_gaps", "get_recent_packet_ts", "get_last_gap_ends",
     )
 
     def __init__(self) -> None:
@@ -86,8 +86,8 @@ class FakeDB:
             "latest": {},     # addr → {"value", "raw"}
             "latest_ts": {},  # addr → ts строки latest_state
             "history": [],    # (addr, value, raw, ts)
-            "enum": [],       # {"addr", "value", "end"}
-            "fault": [],      # {"addr", "bit", "end"}
+            "enum": [],       # {"addr", "value", "start", "end"}
+            "fault": [],      # {"addr", "bit", "start", "end"}
             "gaps": [],
             "events": [],
         }
@@ -158,9 +158,25 @@ class FakeDB:
                 n += 1
         return n
 
+    async def extend_data_gap(self, conn, router_sn, equip_type, panel_id, old_end, new_end):
+        self._enter("extend_data_gap")
+        n = 0
+        for g in self.t["gaps"]:
+            if g["end"] == old_end:
+                g["end"] = new_end
+                n += 1
+        return n
+
     async def get_open_gaps(self, conn):
         self._enter("get_open_gaps")
         return [g for g in self.t["gaps"] if g["end"] is None]
+
+    async def get_last_gap_ends(self, conn):
+        self._enter("get_last_gap_ends")
+        ends = [g["end"] for g in self.t["gaps"] if g["end"] is not None]
+        if not ends:
+            return []
+        return [{"router_sn": SN, "equip_type": ET, "panel_id": PID, "gap_end": max(ends)}]
 
     async def get_recent_packet_ts(self, conn, days, per_panel):
         self._enter("get_recent_packet_ts")
@@ -181,7 +197,13 @@ class FakeDB:
     async def upsert_latest_state_batch(self, conn, rows):
         self._enter("upsert_latest_state_batch")
         self._check_int4(rows)
+        future = datetime.now(timezone.utc) + timedelta(seconds=120)
         for r in rows:
+            # Как WHERE в ON CONFLICT: к более старой метке строка не откатывается,
+            # если её метка не убежала вперёд часов сервера
+            cur = self.t["latest_ts"].get(r[3])
+            if cur is not None and r[4] < cur and cur <= future:
+                continue
             self.t["latest"][r[3]] = {"value": r[5], "raw": r[6]}
             self.t["latest_ts"][r[3]] = r[4]
 
@@ -197,7 +219,7 @@ class FakeDB:
     async def open_enum_state_batch(self, conn, rows):
         self._enter("open_enum_state_batch")
         for r in rows:
-            self.t["enum"].append({"addr": r[3], "value": r[4], "end": None})
+            self.t["enum"].append({"addr": r[3], "value": r[4], "start": r[5], "end": None})
 
     async def close_enum_states_batch(self, conn, rows):
         self._enter("close_enum_states_batch")
@@ -209,7 +231,7 @@ class FakeDB:
     async def open_fault_batch(self, conn, rows):
         self._enter("open_fault_batch")
         for r in rows:
-            self.t["fault"].append({"addr": r[3], "bit": r[4], "end": None})
+            self.t["fault"].append({"addr": r[3], "bit": r[4], "start": r[5], "end": None})
 
     async def close_faults_batch(self, conn, rows):
         self._enter("close_faults_batch")
@@ -247,6 +269,7 @@ class DecodedTestCase(unittest.IsolatedAsyncioTestCase):
             handlers._last_write_ts, handlers._last_packet_ts, handlers._avg_interval,
             handlers._active_fault_bits, handlers._active_enum_states,
             handlers._raw_overflow_warned, handlers._heartbeat_ts, handlers._panel_settled_ts,
+            handlers._last_packet_late, handlers._panel_gap_end,
         ):
             state.clear()
 

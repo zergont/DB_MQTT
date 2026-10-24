@@ -1,0 +1,269 @@
+# Copyright (c) 2026 ООО «НГ-ЭНЕРГОСЕРВИС». Все права защищены.
+# Программный комплекс «Честная Генерация»
+# Модуль записи телеметрии в базу данных
+# Автор: Саввиди Александр Анатольевич | ИНН 4725009270
+#
+# Данное программное обеспечение является конфиденциальным.
+# Несанкционированное копирование, распространение или использование
+# без письменного разрешения правообладателя запрещено.
+
+"""После обрыва связи: heartbeat, запоздалые пачки (ts_status=late), разрывы.
+
+Случай ДЭС №3, 24.10: связи не было с 05:48:15 до 12:38:49. Первой в 12:38:28
+дошла застрявшая пачка медленной группы с меткой 11:48:09 (late, значения
+доаварийные), с 12:38:58 — живые пакеты. Медленные записи роутер шлёт только
+при изменении, снимка после связи нет.
+- heartbeat в 12:38:59, 12:54:07, 13:09:08 повторял рабочие значения
+  со стоянки (снятые до обрыва) со свежей меткой;
+- data_gaps разбился застрявшей пачкой на два: 615 и 616.
+
+Здесь время сжато: обрыв после DOWN, застрявшая пачка STUCK, связь UP.
+
+Запуск из корня репозитория:
+    python -m unittest discover -s tests -t .
+"""
+
+from __future__ import annotations
+
+import unittest
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from unittest import mock
+
+from src import db, handlers
+from src.config import parse_config_dict
+from tests.test_decoded_write import ADDR_ENUM, ADDR_FAULT, ET, PID, SN, packet, reg
+from tests.test_gap_restore import GapRestoreTestCase
+from tests.test_heartbeat import FUEL_P, PANEL, RPM, at
+
+SLOW = 40595        # медленная группа, шлётся только при изменении (ДЭС №3: 49,9)
+
+DOWN = 90           # последний пакет до обрыва
+STUCK = 600         # метка застрявшей пачки внутри обрыва
+UP = 1000           # первый живой пакет после связи
+
+
+class ReconnectTestCase(GapRestoreTestCase):
+
+    async def late(self, sec: float, *regs: dict) -> None:
+        """Запоздалая пачка: декодер пометил её ts_status=late."""
+        await self.handle({**packet(*regs, ts=at(sec).isoformat()), "ts_status": "late"})
+        self.seen[PANEL] = datetime.now(timezone.utc)
+
+    async def counters(self, start: float, end: float) -> None:
+        for sec in range(int(start), int(end) + 1, 9):
+            await self.counter(sec)
+
+    async def before_outage(self) -> None:
+        await self.pkt(0, reg(FUEL_P, 278.7, 2787), reg(SLOW, 49.9, 499), reg(RPM, 0, 0))
+        await self.counters(9, DOWN)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Heartbeat не переносит значение через разрыв
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StaleHeartbeatAfterGapTests(ReconnectTestCase):
+
+    async def test_value_from_before_gap_not_repeated(self):
+        await self.before_outage()
+        await self.flush()                           # до обрыва heartbeat работает: 81
+        await self.pkt(UP, reg(RPM, 0, 0))           # после связи пришли только обороты
+        await self.counters(UP + 9, UP + 90)
+        await self.flush()
+
+        fuel = Decimal("278.7")
+        self.assertEqual(self.series(FUEL_P), [(0, fuel), (81, fuel)])
+        self.assertEqual(self.series(SLOW), [(0, Decimal("49.9")), (81, Decimal("49.9"))])
+        # подтверждённое после связи значение повторяется как обычно
+        self.assertEqual(self.series(RPM), [(0, 0), (81, 0), (UP, 0), (UP + 81, 0)])
+
+    async def test_unchanged_value_without_gap_keeps_heartbeat(self):
+        # Не ограничение по возрасту: значение 0-й секунды повторяется и через 5 мин
+        await self.pkt(0, reg(FUEL_P, 278.7, 2787))
+        for sec in range(9, 361, 9):
+            await self.counter(sec)
+            await self.flush()
+        self.assertEqual([s for s, _ in self.series(FUEL_P)], [0, 63, 126, 189, 252, 315])
+
+    async def test_heartbeat_resumes_when_value_comes_again(self):
+        await self.before_outage()
+        await self.pkt(UP, reg(FUEL_P, 278.7, 2787))     # пришло заново, без изменения
+        await self.counters(UP + 9, UP + 90)
+        await self.flush()
+
+        fuel = Decimal("278.7")
+        self.assertEqual(self.series(FUEL_P), [(0, fuel), (UP, fuel), (UP + 81, fuel)])
+        self.assertEqual(self.series(SLOW), [(0, Decimal("49.9"))])
+
+    async def test_gap_end_survives_restart(self):
+        await self.before_outage()
+        await self.pkt(UP, reg(RPM, 0, 0))
+        await self.counters(UP + 9, UP + 45)
+        await self.restart()                         # конец разрыва — из data_gaps
+
+        await self.counters(UP + 54, UP + 90)
+        await self.flush()
+        self.assertEqual(self.series(FUEL_P), [(0, Decimal("278.7"))])
+        self.assertEqual(handlers._panel_gap_end[PANEL], at(UP))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Запоздалая пачка внутри обрыва не делит разрыв
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LatePacketGapTests(ReconnectTestCase):
+
+    async def test_single_late_packet_does_not_split_gap(self):
+        await self.before_outage()
+        await self.late(STUCK, reg(SLOW, 49.9, 499))
+        self.assertEqual(self.gaps(), [(DOWN, STUCK)])   # пока похоже на конец обрыва
+        await self.counter(UP)
+        await self.counter(UP + 9)
+        self.assertEqual(self.gaps(), [(DOWN, UP)])
+        self.assertEqual(handlers._panel_gap_end[PANEL], at(UP))
+
+    async def test_late_cycle_of_several_blocks(self):
+        await self.before_outage()
+        await self.late(STUCK, reg(SLOW, 49.9, 499))
+        await self.late(STUCK, reg(FUEL_P, 278.7, 2787))     # второй блок того же цикла
+        await self.counter(UP)
+        self.assertEqual(self.gaps(), [(DOWN, UP)])
+
+    async def test_merge_disabled_keeps_split(self):
+        self.cfg.gap_detector.merge_across_late = False
+        await self.before_outage()
+        await self.late(STUCK, reg(SLOW, 49.9, 499))
+        await self.counter(UP)
+        self.assertEqual(self.gaps(), [(DOWN, STUCK), (STUCK, UP)])
+
+    async def test_live_packet_inside_gap_splits_it(self):
+        await self.before_outage()
+        await self.counter(STUCK)                    # живой пакет — связь на миг была
+        await self.counter(UP)
+        self.assertEqual(self.gaps(), [(DOWN, STUCK), (STUCK, UP)])
+
+    async def test_buffer_resend_not_merged(self):
+        await self.before_outage()
+        for sec in range(DOWN + 9, 300, 9):          # роутер дослал буфер до 297
+            await self.late(sec, reg(SLOW, 49.9, 499))
+        await self.counter(UP)
+        self.assertEqual(self.gaps(), [(297, UP)])
+
+    async def test_buffer_resend_with_hole(self):
+        await self.before_outage()
+        for sec in [*range(DOWN + 9, 181, 9), *range(STUCK, 691, 9)]:
+            await self.late(sec, reg(SLOW, 49.9, 499))
+        await self.counter(UP)
+        self.assertEqual(self.gaps(), [(180, STUCK), (690, UP)])
+
+    def test_merge_option_from_config(self):
+        cfg = parse_config_dict({"gap_detector": {"merge_across_late": False}})
+        self.assertFalse(cfg.gap_detector.merge_across_late)
+        self.assertTrue(parse_config_dict({}).gap_detector.merge_across_late)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Запоздалая пачка из прошлого не откатывает состояние
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PastPacketTests(ReconnectTestCase):
+
+    async def test_history_only_latest_state_and_tracker_kept(self):
+        await self.pkt(0, reg(FUEL_P, 278.7, 2787))
+        await self.pkt(9, reg(FUEL_P, 280.4, 2804))
+        await self.counter(18)
+        await self.late(5, reg(FUEL_P, 270.0, 2700))     # дошла после более свежих
+
+        self.assertEqual(self.fake.t["latest"][FUEL_P], {"value": Decimal("280.4"), "raw": 2804})
+        self.assertEqual(self.fake.t["latest_ts"][FUEL_P], at(9))
+        self.assertEqual(
+            self.series(FUEL_P),
+            [(0, Decimal("278.7")), (5, Decimal("270.0")), (9, Decimal("280.4"))],
+        )
+        self.assertEqual(handlers._last_packet_ts[PANEL], at(18))
+        self.assertEqual(handlers._panel_settled_ts[PANEL], at(9))
+        self.assertEqual(handlers._last_write_ts[(SN, ET, PID, FUEL_P)], at(9))
+        self.assertEqual(self.gaps(), [])
+
+    async def test_no_enum_fault_transitions(self):
+        await self.pkt(0, reg(ADDR_ENUM, 1, 1), reg(ADDR_FAULT, {"faults": []}, 0))
+        await self.pkt(9, reg(ADDR_ENUM, 2, 2), reg(ADDR_FAULT, {"faults": [{"bit": 7}]}, 128))
+        await self.counter(18)
+        await self.late(5, reg(ADDR_ENUM, 1, 1), reg(ADDR_FAULT, {"faults": [{"bit": 2}]}, 4))
+
+        enum = [(e["value"], e["start"], e["end"]) for e in self.fake.t["enum"]]
+        self.assertEqual(enum, [(1, at(0), at(9)), (2, at(9), None)])
+        fault = [(f["bit"], f["start"], f["end"]) for f in self.fake.t["fault"]]
+        self.assertEqual(fault, [(7, at(9), None)])
+        self.assertEqual(handlers._active_enum_states[(SN, ET, PID, ADDR_ENUM)], 2)
+        self.assertEqual(handlers._active_fault_bits[(SN, ET, PID, ADDR_FAULT)], {7})
+        # строки history на метке пачки — есть
+        self.assertIn((5, Decimal(1)), self.series(ADDR_ENUM))
+        self.assertIn((5, Decimal(4)), self.series(ADDR_FAULT))
+
+    async def test_late_in_order_packet_processed_normally(self):
+        # Досылка буфера по порядку — обычные данные, переходы пишутся
+        await self.pkt(0, reg(ADDR_ENUM, 1, 1))
+        await self.late(9, reg(ADDR_ENUM, 2, 2))
+        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [2])
+        self.assertEqual(handlers._last_packet_ts[PANEL], at(9))
+
+    async def test_backward_packet_without_late_moves_tracker(self):
+        # Не late — часы роутера отскочили назад: новая шкала и есть текущая
+        await self.counters(0, 18)
+        await self.pkt(5, reg(ADDR_ENUM, 3, 3))
+        self.assertEqual(handlers._last_packet_ts[PANEL], at(5))
+        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [3])
+
+
+class LatestStateGuardTests(ReconnectTestCase):
+
+    def setUp(self) -> None:
+        self.real_upsert = db.upsert_latest_state_batch     # до подмены FakeDB
+        super().setUp()
+
+    async def test_upsert_sql_has_ts_guard(self):
+        conn = mock.Mock()
+        conn.executemany = mock.AsyncMock()
+        await self.real_upsert(conn, [(SN, ET, PID, FUEL_P, at(0), Decimal(1), 1)])
+        sql = " ".join(conn.executemany.await_args.args[0].split())
+        self.assertIn(
+            "WHERE latest_state.ts IS NULL OR EXCLUDED.ts >= latest_state.ts "
+            "OR latest_state.ts > now() + interval '120 seconds'",
+            sql,
+        )
+
+    async def test_clock_ran_ahead_then_corrected(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        await self.handle({**packet(reg(FUEL_P, 278.7, 2787),
+                                    ts=(now + timedelta(hours=2)).isoformat()),
+                           "ts_status": "tz_shift"})
+        await self.handle(packet(reg(FUEL_P, 280.4, 2804), ts=now.isoformat()))
+        self.assertEqual(self.fake.t["latest"][FUEL_P]["value"], Decimal("280.4"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Сценарий 24.10 целиком
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Des3Outage2410Tests(ReconnectTestCase):
+
+    async def test_outage(self):
+        await self.before_outage()
+        await self.late(STUCK, reg(SLOW, 49.9, 499))     # 11:48:09, дошла в 12:38:28
+        await self.pkt(UP, reg(RPM, 0, 0))               # 12:38:58, машина стоит
+        await self.counters(UP + 9, UP + 90)
+        await self.flush()
+
+        self.assertEqual(self.gaps(), [(DOWN, UP)])      # один разрыв, а не 615 + 616
+        # рабочие значения со стоянки не повторены со свежей меткой
+        self.assertEqual(self.series(FUEL_P), [(0, Decimal("278.7"))])
+        self.assertEqual(
+            self.series(SLOW), [(0, Decimal("49.9")), (STUCK, Decimal("49.9"))],
+        )
+        self.assertEqual(self.series(RPM), [(0, 0), (UP, 0), (UP + 81, 0)])
+
+
+if __name__ == "__main__":
+    unittest.main()
