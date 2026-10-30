@@ -75,24 +75,37 @@ history_policy:
     value_kind: "analog"      # analog|discrete|counter|enum|text
 
   # KPI регистры — высокая частота, per-register настройки
+  # (как на рабочем сервере: update.sh сравнивает список целиком)
   kpi_registers:
     - addr: 40034
       equip_type: "pcc"
-      name: "GensetTotal kW (Нагрузка)"
+      name: "Нагрузка"
       min_interval_sec: 0     # каждый пакет (ограничение только по tolerance)
       heartbeat_sec: 60
       tolerance: 0.5
     - addr: 40062
       equip_type: "pcc"
-      name: "OilPressure (Давление масла)"
+      name: "P масла"
       min_interval_sec: 0
       heartbeat_sec: 60
       tolerance: 0.1
-    - addr: 40070
+    - addr: 40068
       equip_type: "pcc"
-      name: "Наработка"
-      min_interval_sec: 5
-      heartbeat_sec: 300
+      name: "Обороты"
+      min_interval_sec: 0
+      heartbeat_sec: 60
+      tolerance: 1
+    - addr: 40029
+      equip_type: "pcc"
+      name: "Ток"
+      min_interval_sec: 0
+      heartbeat_sec: 60
+      tolerance: 1
+    - addr: 40063
+      equip_type: "pcc"
+      name: "t масла"
+      min_interval_sec: 0
+      heartbeat_sec: 60
       tolerance: 1
 
 # ---------- Events policy ----------------------------------------------------
