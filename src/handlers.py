@@ -54,15 +54,36 @@ _panel_settled_ts: dict[tuple[str, str, int], datetime] = {}
 _last_packet_ts: dict[tuple[str, str, int], datetime] = {}
 _avg_interval:   dict[tuple[str, str, int], float] = {}
 
-# Пакет с меткой _last_packet_ts пришёл запоздалым (ts_status=late от декодера)
-_last_packet_late: dict[tuple[str, str, int], bool] = {}
-
 # Конец последнего разрыва панели (часы роутера): значения, снятые раньше,
 # после восстановления связи не подтверждены — heartbeat их не повторяет
 _panel_gap_end: dict[tuple[str, str, int], datetime] = {}
 
-# ts_status декодера (telemetry2 ≥ 2.3.0): залежалая пачка после обрыва
-_TS_LATE = "late"
+# ── Проверки перед записью ──────────────────────────────────────────────────
+# ts_status декодера (telemetry2 ≥ 2.3.0), при котором метке нельзя верить
+# как текущей: залежалая пачка после обрыва, устойчивый отход часов роутера
+LATE_TS_STATUSES = frozenset({"late", "offset_jump"})
+
+# Метка впереди часов сервера больше чем на столько — пакет не пишется
+FUTURE_SLACK_SEC = 60
+
+# Троттлинг WARNING о метке из будущего и о конфликте (addr, ts):
+# (router_sn, equip_type, panel_id) → datetime
+_future_warned: dict[tuple[str, str, int], datetime] = {}
+_conflict_warned: dict[tuple[str, str, int], datetime] = {}
+_GUARD_WARN_EVERY_SEC = 3600
+
+
+def _new_guard_stats() -> dict[str, Any]:
+    return {
+        "future_dropped": 0,      # пакеты с меткой из будущего — не записаны
+        "history_only": 0,        # поздние пакеты — записаны только в history
+        "history_conflicts": 0,   # строки history: (addr, ts) занят другим значением
+        "ts_status": {},          # пакеты по ts_status декодера ("none" — поля нет)
+    }
+
+
+# Счётчики с момента запуска (см. /health)
+guard_stats: dict[str, Any] = _new_guard_stats()
 
 # Восстановление при старте: окно history и число последних меток панели
 _GAP_RESTORE_DAYS = 1
@@ -102,15 +123,14 @@ class _StateDelta:
     """
 
     __slots__ = (
-        "packet_ts", "packet_late", "gap_end", "settled_ts", "avg_interval",
+        "packet_ts", "gap_end", "settled_ts", "avg_interval",
         "fault_bits", "enum_states", "write_ts",
     )
 
     def __init__(self) -> None:
         self.packet_ts:    dict[tuple[str, str, int], datetime] = {}
-        self.packet_late:  dict[tuple[str, str, int], bool] = {}
         self.gap_end:      dict[tuple[str, str, int], datetime] = {}
-        self.settled_ts:   dict[tuple[str, str, int], datetime | None] = {}   # None — сбросить
+        self.settled_ts:   dict[tuple[str, str, int], datetime] = {}
         self.avg_interval: dict[tuple[str, str, int], float] = {}
         self.fault_bits:   dict[tuple[str, str, int, int], set[int]] = {}
         self.enum_states:  dict[tuple[str, str, int, int], int | None] = {}
@@ -128,13 +148,8 @@ class _StateDelta:
 
     def apply(self) -> None:
         _last_packet_ts.update(self.packet_ts)
-        _last_packet_late.update(self.packet_late)
         _panel_gap_end.update(self.gap_end)
-        for ekey, settled in self.settled_ts.items():
-            if settled is None:
-                _panel_settled_ts.pop(ekey, None)
-            else:
-                _panel_settled_ts[ekey] = settled
+        _panel_settled_ts.update(self.settled_ts)
         _avg_interval.update(self.avg_interval)
         _active_fault_bits.update(self.fault_bits)
         _active_enum_states.update(self.enum_states)
@@ -417,33 +432,22 @@ async def _check_equipment_gap(
     ts: datetime,          # device time из payload
     gap_cfg: GapDetectorCfg,
     delta: _StateDelta,
-    late: bool = False,    # ts_status=late от декодера
-) -> bool:
+) -> None:
     """Проверка gap'а на уровне оборудования.
 
-    Использует device-time (ts) для корректной обработки буферизации:
-    если роутер потерял связь, накопил пакеты и выслал их пачкой,
-    интервалы по device-time будут нормальными — ложного gap'а не будет.
+    Использует device-time (ts): интервалы считаются по часам роутера.
+    Вызывается только для записей по порядку (см. _is_late_record): метка
+    не раньше последней, поэтому трекер только растёт, а разрыв закрывает
+    первая такая запись. Поздняя запись разрыв не режет и не сдвигает
+    (ДЭС №3 24.10: застрявшая пачка 11:48:09 разбила обрыв на 615 и 616).
 
     Новое состояние трекера пишется в delta и применяется после commit.
-
-    Возвращает False для пакета из прошлого: запоздалого (late) с меткой
-    раньше последней. Он трекер назад не двигает и разрывов не трогает —
-    более свежие пакеты уже записаны.
     """
     ekey = (router_sn, equip_type, panel_id)
     prev_ts = _last_packet_ts.get(ekey)
 
     if prev_ts is not None:
         elapsed = (ts - prev_ts).total_seconds()
-
-        if elapsed < 0:
-            if late:
-                return False
-            # Часы роутера отскочили назад: новая шкала и есть текущая
-            delta.packet_ts[ekey] = ts
-            delta.packet_late[ekey] = late
-            return True
 
         avg = _avg_interval.get(ekey)
 
@@ -463,28 +467,12 @@ async def _check_equipment_gap(
                 delta.avg_interval[ekey] = gap_cfg.ema_alpha * elapsed + (1 - gap_cfg.ema_alpha) * avg
 
         if is_gap:
-            # Предыдущая пачка — запоздалая и сама закрыла разрыв своей меткой
-            # (застрявшее сообщение, ДЭС №3 24.10: id 615 + 616): связи всё это
-            # время не было, разрыв продлевается через неё, а не делится на два.
-            # Честная досылка буфера сюда не попадает: её пачки идут подряд,
-            # и разрыв закрывается не на последней из них.
-            extended = 0
-            if gap_cfg.merge_across_late and _last_packet_late.get(ekey):
-                extended = await db.extend_data_gap(
-                    conn, router_sn, equip_type, panel_id, prev_ts, ts,
-                )
-            if extended:
-                logger.info(
-                    "GAP extended %s/%s/%d across late packet at %s: elapsed=%.0fs",
-                    router_sn, equip_type, panel_id, prev_ts.isoformat(), elapsed,
-                )
-            else:
-                gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
-                logger.info(
-                    "GAP opened id=%d %s/%s/%d: elapsed=%.0fs threshold=%.0fs avg=%s",
-                    gap_id, router_sn, equip_type, panel_id, elapsed, threshold,
-                    "n/a" if avg is None else f"{avg:.0f}s",
-                )
+            gap_id = await db.insert_data_gap(conn, router_sn, equip_type, panel_id, prev_ts)
+            logger.info(
+                "GAP opened id=%d %s/%s/%d: elapsed=%.0fs threshold=%.0fs avg=%s",
+                gap_id, router_sn, equip_type, panel_id, elapsed, threshold,
+                "n/a" if avg is None else f"{avg:.0f}s",
+            )
 
         # Безусловно: закрыть любой открытый gap (gap_end IS NULL) для этого
         # оборудования, включая тот, что открыт строкой выше, и любые "осиротевшие"
@@ -499,8 +487,6 @@ async def _check_equipment_gap(
             delta.gap_end[ekey] = ts
 
     delta.packet_ts[ekey] = ts
-    delta.packet_late[ekey] = late
-    return True
 
 
 def _note_packet_ts(ekey: tuple[str, str, int], ts: datetime, delta: _StateDelta) -> None:
@@ -509,13 +495,55 @@ def _note_packet_ts(ekey: tuple[str, str, int], ts: datetime, delta: _StateDelta
     Блоки одного цикла опроса приходят с одной меткой роутера и доходят до
     записи с разбросом: пока виден последний ts, часть его блоков может быть
     ещё в пути. Предыдущая отличная метка надёжна — пакеты панели
-    обрабатываются по порядку одним воркером. Пакет «назад» (не по порядку
-    или часы роутера отскочили) — сброс, метка появится со следующим циклом.
+    обрабатываются по порядку одним воркером. Вызывается только для записей
+    по порядку (метка не раньше последней).
     """
     latest = _last_packet_ts.get(ekey)
-    if latest is None or ts == latest:
-        return
-    delta.settled_ts[ekey] = latest if ts > latest else None
+    if latest is not None and ts > latest:
+        delta.settled_ts[ekey] = latest
+
+
+def _is_late_record(ekey: tuple[str, str, int], ts: datetime, ts_status: str | None) -> bool:
+    """Поздняя запись: пишется только в history.
+
+    - декодер пометил метку ненадёжной (late — залежалая пачка после обрыва,
+      offset_jump — устойчивый отход часов роутера);
+    - или метка раньше последней записанной метки панели.
+
+    Такая запись не открывает и не закрывает периоды enum/fault (иначе конец
+    раньше начала: 30.09 стоп закрыт на 29.09 18:02:53), не трогает
+    latest_state и трекер разрывов. Порог «раньше на 60 с» из задачи не
+    нужен: период, открытый на последней метке, закрылся бы раньше начала
+    и на секунду; блоки одного цикла идут с одной меткой и поздними не
+    считаются.
+    """
+    if ts_status in LATE_TS_STATUSES:
+        return True
+    prev = _last_packet_ts.get(ekey)
+    return prev is not None and ts < prev
+
+
+def _drop_future(ekey: tuple[str, str, int], ts: datetime, now: datetime,
+                 ts_status: str | None) -> bool:
+    """Метка впереди часов сервера больше чем на FUTURE_SLACK_SEC: пакет не пишется.
+
+    Декодер такие записи исправляет (tz_shift → corrected) или держит в
+    карантине (future); здесь — последняя страховка. До 09.10 метки +2 ч
+    дали вывернутые периоды enum и 56 разрывов с концом в будущем.
+    """
+    ahead = (ts - now).total_seconds()
+    if ahead <= FUTURE_SLACK_SEC:
+        return False
+    guard_stats["future_dropped"] += 1
+    last = _future_warned.get(ekey)
+    if last is None or (now - last).total_seconds() >= _GUARD_WARN_EVERY_SEC:
+        _future_warned[ekey] = now
+        logger.warning(
+            "Future timestamp %s/%s/%d: ts=%s is %.0fs ahead of server (ts_status=%s), "
+            "packet dropped (%d since start)",
+            *ekey, ts.isoformat(), ahead, ts_status, guard_stats["future_dropped"],
+        )
+    return True
 
 
 def _first_after_gap(
@@ -553,12 +581,22 @@ async def _handle_decoded(
             ts = datetime.fromisoformat(str(ts_str))
         except (ValueError, TypeError):
             logger.warning("Bad timestamp in decoded %s/%d: %s", router_sn, panel_id, ts_str)
+        if ts.tzinfo is None:          # как asyncpg пишет naive в timestamptz
+            ts = ts.replace(tzinfo=timezone.utc)
 
-    late = data.get("ts_status") == _TS_LATE
+    ts_status = data.get("ts_status")
+    if not isinstance(ts_status, str):
+        ts_status = None
 
     registers = data.get("registers")
     if not isinstance(registers, list):
         logger.warning("No registers[] in decoded %s/%d", router_sn, panel_id)
+        return
+
+    pkt = (router_sn, equip_type, panel_id)
+    by_status = guard_stats["ts_status"]
+    by_status[ts_status or "none"] = by_status.get(ts_status or "none", 0) + 1
+    if _drop_future(pkt, ts, now, ts_status):
         return
 
     addrs: list[int] = sorted({
@@ -580,28 +618,25 @@ async def _handle_decoded(
 
     # In-memory состояние меняем только после commit (см. _StateDelta)
     delta = _StateDelta()
-    pkt = (router_sn, equip_type, panel_id)
+    late = _is_late_record(pkt, ts, ts_status)
 
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             await db.upsert_object(conn, router_sn)
             await db.upsert_equipment(conn, router_sn, equip_type, panel_id)
 
-            # Gap detection по device-time. Пакет из прошлого (запоздалый, метка
-            # раньше последней) пишется только в history: latest_state новее,
-            # а переход enum/fault на его метке закрыл бы период раньше начала
-            in_order = await _check_equipment_gap(
-                conn, router_sn, equip_type, panel_id, ts, cfg.gap_detector, delta, late,
-            )
-            past = not in_order
-            if in_order:
-                _note_packet_ts(pkt, ts, delta)
-            else:
-                logger.info(
-                    "Late packet from the past %s/%s/%d: ts=%s < last=%s, history only",
+            # Gap detection по device-time — только записи по порядку
+            if late:
+                logger.debug(
+                    "Late record %s/%s/%d: ts=%s last=%s ts_status=%s, history only",
                     router_sn, equip_type, panel_id, ts.isoformat(),
-                    _last_packet_ts[pkt].isoformat(),
+                    _last_packet_ts.get(pkt), ts_status,
                 )
+            else:
+                await _check_equipment_gap(
+                    conn, router_sn, equip_type, panel_id, ts, cfg.gap_detector, delta,
+                )
+                _note_packet_ts(pkt, ts, delta)
 
             prev_map = await db.get_latest_state_rows_many(
                 conn, router_sn, equip_type, panel_id, addrs,
@@ -627,7 +662,7 @@ async def _handle_decoded(
                             event_rows=event_rows,
                             cfg=cfg,
                             delta=delta,
-                            past=past,
+                            history_only=late,
                         )
                     continue
 
@@ -642,15 +677,16 @@ async def _handle_decoded(
                     enum_close_batch=enum_close_batch,
                     event_rows=event_rows,
                     delta=delta,
-                    past=past,
+                    history_only=late,
                 )
 
             if latest_rows_map:
                 await _write_batch("latest_state", db.upsert_latest_state_batch,
                                    conn, list(latest_rows_map.values()), pkt)
             if history_batch:
-                await _write_batch("history", db.insert_history_batch,
-                                   conn, history_batch, pkt)
+                rows = [(*r, ts_status) for r in history_batch]
+                rejected = await _write_batch("history", db.insert_history_batch, conn, rows, pkt)
+                await _note_history_conflicts(conn, rejected, now)
             if enum_close_batch:                            # сначала закрываем старые
                 await _write_batch("enum_close", db.close_enum_states_batch,
                                    conn, enum_close_batch, pkt)
@@ -668,6 +704,8 @@ async def _handle_decoded(
 
     # Транзакция зафиксирована — теперь можно обновить in-memory состояние
     delta.apply()
+    if late:
+        guard_stats["history_only"] += 1
 
     logger.debug(
         "Decoded %s/%s/%d: %d regs, latest=%d, history=%d, "
@@ -697,7 +735,7 @@ def _process_fault_bitmap(
     event_rows: list[tuple],
     cfg: AppConfig,
     delta: _StateDelta,
-    past: bool = False,
+    history_only: bool = False,
 ) -> None:
     """Обработка fault bitmap регистра.
 
@@ -706,11 +744,11 @@ def _process_fault_bitmap(
       разрыва связи (см. _first_after_gap).
     - name/severity живут в cg/v1/maps/<device_type>, не в БД.
     - В events пишем только {addr, bit}.
-    - Пакет из прошлого (past): только строка history на его метке.
+    - Поздняя запись (history_only): только строка history на её метке.
     """
     dec_raw = Decimal(str(raw_val)) if raw_val is not None else None
 
-    if past:
+    if history_only:
         history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_raw, raw_val))
         return
 
@@ -776,7 +814,7 @@ def _process_register(
     enum_close_batch: list[tuple],
     event_rows: list[tuple],
     delta: _StateDelta,
-    past: bool = False,
+    history_only: bool = False,
 ) -> None:
     try:
         addr = int(reg["addr"])
@@ -805,9 +843,9 @@ def _process_register(
 
     params = resolve_params(cfg, equip_type, addr, map_unit, kpi_map)
 
-    # Пакет из прошлого: строка history на его метке, как есть — сравнивать
-    # не с чем (latest_state новее). Время последней записи не двигаем.
-    if past:
+    # Поздняя запись: строка history на её метке, как есть — сравнивать не
+    # с чем (latest_state новее). Время последней записи не двигаем.
+    if history_only:
         if params.store_history:
             history_batch.append((router_sn, equip_type, panel_id, addr, ts, dec_value, raw_val))
         return
@@ -910,19 +948,20 @@ _RE_EXECUTEMANY_ELEMENT = re.compile(r"element #(\d+) of executemany")
 
 async def _write_batch(
     name: str,
-    write: Callable[[asyncpg.Connection, list[tuple]], Awaitable[None]],
+    write: Callable[[asyncpg.Connection, list[tuple]], Awaitable[Any]],
     conn: asyncpg.Connection,
     rows: list[tuple],
     pkt: tuple[str, str, int],
-) -> None:
+) -> Any:
     """Записать батч; при ошибке данных указать регистр, на котором упало.
 
     rows — кортежи вида (router_sn, equip_type, panel_id, addr, ...).
     asyncpg сообщает номер строки executemany ("element #N") — по нему
     находим addr; если номера нет, перечисляем addr всего батча.
+    Возвращает результат write.
     """
     try:
-        await write(conn, rows)
+        return await write(conn, rows)
     except asyncpg.DataError as e:
         router_sn, equip_type, panel_id = pkt
         m = _RE_EXECUTEMANY_ELEMENT.search(str(e))
@@ -933,6 +972,44 @@ async def _write_batch(
         raise PacketDataError(
             f"{name} {router_sn}/{equip_type}/{panel_id} {where}: {e}"
         ) from e
+
+
+async def _note_history_conflicts(
+    conn: asyncpg.Connection,
+    rejected: list[tuple],
+    now: datetime,
+) -> None:
+    """Строки history, не вставленные из-за занятого (addr, ts).
+
+    Побеждает первая по прибытию. Совпадение с тем же значением — повторная
+    доставка, не сигнал. С другим — счётчик и WARNING не чаще раза в час
+    на панель: выше по цепочке снова что-то не так (до правки — 117 групп
+    (addr, ts), у 115 значения разные).
+    """
+    by_panel: dict[tuple[str, str, int], list[tuple]] = {}
+    for r in rejected or ():
+        by_panel.setdefault(r[:3], []).append(r)
+
+    for ekey, rows in by_panel.items():
+        kept = await db.get_history_rows(conn, *ekey, [(r[3], r[4]) for r in rows])
+        diff = []
+        for r in rows:
+            old = kept.get((r[3], r[4]))
+            if old is not None and (old["value"] != r[5] or old["raw"] != r[6]):
+                diff.append((r, old))
+        if not diff:
+            continue
+        guard_stats["history_conflicts"] += len(diff)
+        last = _conflict_warned.get(ekey)
+        if last is None or (now - last).total_seconds() >= _GUARD_WARN_EVERY_SEC:
+            _conflict_warned[ekey] = now
+            r, old = diff[0]
+            logger.warning(
+                "History conflict %s/%s/%d: %d row(s) with taken (addr, ts) and another "
+                "value, e.g. addr=%d ts=%s kept=%s rejected=%s (%d since start)",
+                *ekey, len(diff), r[3], r[4].isoformat(), old["value"], r[5],
+                guard_stats["history_conflicts"],
+            )
 
 
 def _update_last_write_ts(key: tuple, ts: datetime) -> None:
@@ -1044,8 +1121,9 @@ async def _heartbeat_flush_once(
                 # без разрыва — подтверждённое, его heartbeat нужен.
                 if gap_end is not None and prev["ts"] < gap_end:
                     continue
-                batch.append((sn, et, pid, addr, pts, prev["value"], prev["raw"]))
-            await db.insert_history_batch(conn, batch)
+                batch.append((sn, et, pid, addr, pts, prev["value"], prev["raw"], None))
+            rejected = await db.insert_history_batch(conn, batch)
+            await _note_history_conflicts(conn, rejected, now)
             # Метка heartbeat — только после успешной вставки
             for row in batch:
                 _heartbeat_ts[row[:4]] = pts

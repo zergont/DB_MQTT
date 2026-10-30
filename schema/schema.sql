@@ -167,10 +167,15 @@ CREATE TABLE IF NOT EXISTS history (
     ts              TIMESTAMPTZ NOT NULL,
     received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     value           NUMERIC,
-    raw             INT
+    raw             INT,
+    -- ts_status декодера: NULL/ok — норма, late — опоздала (только history),
+    -- clock_fixed — переподписана декодером, corrected — исправлен пояс.
+    -- NULL и у строк heartbeat.
+    ts_status       TEXT
 );
 
 -- Миграция для существующих установок
+-- (ts_status и уникальный ключ — вручную: schema/migrate_2.9.0.sql)
 ALTER TABLE history DROP COLUMN IF EXISTS text;
 ALTER TABLE history DROP COLUMN IF EXISTS reason;
 ALTER TABLE history DROP COLUMN IF EXISTS write_reason;
@@ -188,8 +193,21 @@ ALTER TABLE history SET (
     timescaledb.compress_orderby   = 'ts ASC'
 );
 
-CREATE INDEX IF NOT EXISTS idx_history_key_ts
-    ON history (router_sn, equip_type, panel_id, addr, ts DESC);
+-- Один ряд на (регистр, ts): вставка ON CONFLICT DO NOTHING, побеждает первая
+-- по прибытию. На новой установке — сразу. На существующей сначала удалить
+-- дубли: schema/migrate_2.9.0.sql (до неё работает прежний неуникальный
+-- idx_history_key_ts). Здесь — только на пустой таблице: построение на
+-- заполненной с дублями падает в конце полного прохода, и так на каждом
+-- update.sh.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_history_key_ts_uniq')
+       AND NOT EXISTS (SELECT 1 FROM history LIMIT 1) THEN
+        CREATE UNIQUE INDEX idx_history_key_ts_uniq
+            ON history (router_sn, equip_type, panel_id, addr, ts DESC);
+        DROP INDEX IF EXISTS idx_history_key_ts;
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_history_received_at
     ON history (received_at DESC);

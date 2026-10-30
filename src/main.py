@@ -33,6 +33,7 @@ from src import db
 from src.config import AppConfig, load_config
 from src.gps_filter import GpsPoint
 from src.handlers import (
+    LATE_TS_STATUSES,
     PacketDataError,
     dispatch,
     get_gps_filter,
@@ -65,11 +66,12 @@ class _IngestItem:
 
 
 def _is_late(payload: bytes) -> bool:
-    """Пачка decoded помечена декодером как запоздалая (ts_status=late)."""
-    if b'"late"' not in payload:     # почти все пачки живые — без разбора JSON
+    """Метка пачки decoded ненадёжна по декодеру (ts_status late, offset_jump)."""
+    # почти все пачки живые — без разбора JSON
+    if not any(f'"{s}"'.encode() in payload for s in LATE_TS_STATUSES):
         return False
     try:
-        return json.loads(payload).get("ts_status") == "late"
+        return json.loads(payload).get("ts_status") in LATE_TS_STATUSES
     except (ValueError, AttributeError):
         return False
 
@@ -341,6 +343,12 @@ async def _run(cfg: AppConfig, config_path: Path) -> None:
     health_state = HealthState(q_decoded=_QueueGroup(q_decoded_shards), q_telemetry=q_telemetry)
 
     try:
+        async with db.pool().acquire() as conn:
+            if not await db.detect_history_ts_status(conn):
+                logger.warning(
+                    "history.ts_status column is missing: writing without it "
+                    "(apply schema/migrate_2.9.0.sql)"
+                )
         await _restore_gps_state(cfg)
         await restore_write_timestamps()
         await restore_gap_tracker()

@@ -111,10 +111,6 @@ gap_detector:
   multiplier: 5              # порог = avg_interval × multiplier
   ema_alpha: 0.1             # коэффициент сглаживания EMA (0.01…1.0)
   min_threshold_sec: 60      # минимальный порог gap (сек), независимо от avg
-  # Одиночная запоздалая пачка (ts_status=late от декодера) внутри обрыва не
-  # делит разрыв на два: следующий разрыв продлевает тот, что она закрыла.
-  # false — как до 2.8.0 (два разрыва с границей на метке пачки).
-  merge_across_late: true
 
 # ---------- Retention (очистка) — только информационно ----------------------
 # TimescaleDB Retention Policies устанавливаются в schema.sql через setup_db.py.

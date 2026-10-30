@@ -249,7 +249,6 @@ const FIELDS_GAP = [
   ["multiplier",        "Множитель порога",    "number", "Порог = avg_interval × multiplier"],
   ["ema_alpha",         "EMA alpha",           "number", "Сглаживание среднего интервала (0.01…1.0)"],
   ["min_threshold_sec", "Мин. порог gap (сек)","number", "Нижняя граница порога независимо от avg"],
-  ["merge_across_late", "Сшивать через позднюю пачку", "bool", "Одиночная пачка ts_status=late внутри обрыва не делит разрыв на два"],
 ];
 
 function renderSection(sectionId, data, fields) {

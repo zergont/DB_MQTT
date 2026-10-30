@@ -31,7 +31,6 @@ from decimal import Decimal
 from unittest import mock
 
 from src import db, handlers
-from src.config import parse_config_dict
 from tests.test_decoded_write import ADDR_ENUM, ADDR_FAULT, ET, PID, SN, packet, reg
 from tests.test_gap_restore import GapRestoreTestCase
 from tests.test_heartbeat import FUEL_P, PANEL, RPM, at
@@ -117,7 +116,7 @@ class LatePacketGapTests(ReconnectTestCase):
     async def test_single_late_packet_does_not_split_gap(self):
         await self.before_outage()
         await self.late(STUCK, reg(SLOW, 49.9, 499))
-        self.assertEqual(self.gaps(), [(DOWN, STUCK)])   # пока похоже на конец обрыва
+        self.assertEqual(self.gaps(), [])                # разрыв не закрывает
         await self.counter(UP)
         await self.counter(UP + 9)
         self.assertEqual(self.gaps(), [(DOWN, UP)])
@@ -130,37 +129,29 @@ class LatePacketGapTests(ReconnectTestCase):
         await self.counter(UP)
         self.assertEqual(self.gaps(), [(DOWN, UP)])
 
-    async def test_merge_disabled_keeps_split(self):
-        self.cfg.gap_detector.merge_across_late = False
-        await self.before_outage()
-        await self.late(STUCK, reg(SLOW, 49.9, 499))
-        await self.counter(UP)
-        self.assertEqual(self.gaps(), [(DOWN, STUCK), (STUCK, UP)])
-
     async def test_live_packet_inside_gap_splits_it(self):
         await self.before_outage()
         await self.counter(STUCK)                    # живой пакет — связь на миг была
         await self.counter(UP)
         self.assertEqual(self.gaps(), [(DOWN, STUCK), (STUCK, UP)])
 
-    async def test_buffer_resend_not_merged(self):
+    async def test_late_resend_written_but_gap_kept(self):
+        # Досылка буфера (вся late): строки в history есть, но разрыв — от
+        # последней живой записи; трекер поздние записи не двигают
         await self.before_outage()
-        for sec in range(DOWN + 9, 300, 9):          # роутер дослал буфер до 297
+        for sec in range(DOWN + 9, 300, 9):
             await self.late(sec, reg(SLOW, 49.9, 499))
         await self.counter(UP)
-        self.assertEqual(self.gaps(), [(297, UP)])
+        self.assertEqual(self.gaps(), [(DOWN, UP)])
+        self.assertEqual(len(self.series(SLOW)), 1 + 23)
 
-    async def test_buffer_resend_with_hole(self):
-        await self.before_outage()
-        for sec in [*range(DOWN + 9, 181, 9), *range(STUCK, 691, 9)]:
-            await self.late(sec, reg(SLOW, 49.9, 499))
+    async def test_late_record_does_not_move_gap_start_back(self):
+        # Разрыв 532: начат на метке поздней записи 18:03:01, хотя живые
+        # строки шли до 18:04:47
+        await self.counters(0, DOWN)
+        await self.late(DOWN - 100, reg(SLOW, 49.9, 499))
         await self.counter(UP)
-        self.assertEqual(self.gaps(), [(180, STUCK), (690, UP)])
-
-    def test_merge_option_from_config(self):
-        cfg = parse_config_dict({"gap_detector": {"merge_across_late": False}})
-        self.assertFalse(cfg.gap_detector.merge_across_late)
-        self.assertTrue(parse_config_dict({}).gap_detector.merge_across_late)
+        self.assertEqual(self.gaps(), [(DOWN, UP)])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,19 +193,28 @@ class PastPacketTests(ReconnectTestCase):
         self.assertIn((5, Decimal(1)), self.series(ADDR_ENUM))
         self.assertIn((5, Decimal(4)), self.series(ADDR_FAULT))
 
-    async def test_late_in_order_packet_processed_normally(self):
-        # Досылка буфера по порядку — обычные данные, переходы пишутся
+    async def test_late_in_order_packet_history_only(self):
+        # late и по порядку — всё равно только history (метке не верим)
         await self.pkt(0, reg(ADDR_ENUM, 1, 1))
         await self.late(9, reg(ADDR_ENUM, 2, 2))
-        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [2])
-        self.assertEqual(handlers._last_packet_ts[PANEL], at(9))
+        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [1])
+        self.assertEqual(handlers._last_packet_ts[PANEL], at(0))
+        self.assertIn((9, Decimal(2)), self.series(ADDR_ENUM))
 
-    async def test_backward_packet_without_late_moves_tracker(self):
-        # Не late — часы роутера отскочили назад: новая шкала и есть текущая
+    async def test_backward_packet_without_status_is_history_only(self):
+        # Без пометки декодера, но метка раньше последней — трекер только растёт
         await self.counters(0, 18)
         await self.pkt(5, reg(ADDR_ENUM, 3, 3))
-        self.assertEqual(handlers._last_packet_ts[PANEL], at(5))
-        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [3])
+        self.assertEqual(handlers._last_packet_ts[PANEL], at(18))
+        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [])
+        self.assertEqual(self.series(ADDR_ENUM), [(5, Decimal(3))])
+
+    async def test_offset_jump_is_history_only(self):
+        await self.pkt(0, reg(ADDR_ENUM, 1, 1))
+        await self.handle({**packet(reg(ADDR_ENUM, 2, 2), ts=at(9).isoformat()),
+                           "ts_status": "offset_jump"})
+        self.assertEqual(self.fake.open_enum(ADDR_ENUM), [1])
+        self.assertEqual(handlers._last_packet_ts[PANEL], at(0))
 
 
 class LatestStateGuardTests(ReconnectTestCase):
@@ -230,15 +230,16 @@ class LatestStateGuardTests(ReconnectTestCase):
         sql = " ".join(conn.executemany.await_args.args[0].split())
         self.assertIn(
             "WHERE latest_state.ts IS NULL OR EXCLUDED.ts >= latest_state.ts "
-            "OR latest_state.ts > now() + interval '120 seconds'",
+            "OR latest_state.ts > now() + interval '60 seconds'",
             sql,
         )
 
-    async def test_clock_ran_ahead_then_corrected(self):
+    async def test_future_row_from_old_version_overwritten(self):
+        # Строка с меткой +2 ч осталась с версий до 2.9.0 (такие пакеты теперь
+        # не пишутся): срез не замерзает до её наступления
         now = datetime.now(timezone.utc).replace(microsecond=0)
-        await self.handle({**packet(reg(FUEL_P, 278.7, 2787),
-                                    ts=(now + timedelta(hours=2)).isoformat()),
-                           "ts_status": "tz_shift"})
+        self.fake.t["latest"][FUEL_P] = {"value": Decimal("278.7"), "raw": 2787}
+        self.fake.t["latest_ts"][FUEL_P] = now + timedelta(hours=2)
         await self.handle(packet(reg(FUEL_P, 280.4, 2804), ts=now.isoformat()))
         self.assertEqual(self.fake.t["latest"][FUEL_P]["value"], Decimal("280.4"))
 

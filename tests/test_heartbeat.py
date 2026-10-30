@@ -190,13 +190,13 @@ class SettledTsTests(HeartbeatTestCase):
         await self.counter(18)
         self.assertEqual(handlers._panel_settled_ts[PANEL], at(9))
 
-    async def test_backward_ts_resets_settled(self):
+    async def test_backward_ts_keeps_settled(self):
         await self.counter(0)
         await self.counter(9)
-        await self.counter(5)                        # пакет «назад»
-        self.assertNotIn(PANEL, handlers._panel_settled_ts)
+        await self.counter(5)                        # пакет «назад» — поздняя запись
+        self.assertEqual(handlers._panel_settled_ts[PANEL], at(0))
         await self.counter(18)
-        self.assertEqual(handlers._panel_settled_ts[PANEL], at(5))
+        self.assertEqual(handlers._panel_settled_ts[PANEL], at(9))
 
     async def test_settled_not_advanced_on_failed_write(self):
         await self.counter(0)

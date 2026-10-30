@@ -192,10 +192,10 @@ async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple])
     Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw)
 
     Строка не откатывается к более старой метке (пакет пришёл не по порядку).
-    Исключение — метка в строке впереди часов сервера больше чем на 2 мин
-    (порог future декодера): часы роутера убегали вперёд (tz_shift в режиме
-    flag, offset_jump) и вернулись. Без него срез замёрз бы, пока время не
-    догонит убежавшую метку.
+    Исключение — метка в строке впереди часов сервера больше чем на 60 с
+    (handlers.FUTURE_SLACK_SEC; такие пакеты с 2.9.0 не пишутся, но строки
+    могли остаться с прежних версий). Без него срез замёрз бы, пока время
+    не догонит убежавшую метку.
     """
     if not rows:
         return
@@ -211,7 +211,7 @@ async def upsert_latest_state_batch(conn: asyncpg.Connection, rows: list[tuple])
           updated_at = now()
         WHERE latest_state.ts IS NULL
            OR EXCLUDED.ts >= latest_state.ts
-           OR latest_state.ts > now() + interval '120 seconds'
+           OR latest_state.ts > now() + interval '60 seconds'
         """,
         rows,
     )
@@ -241,22 +241,90 @@ async def get_latest_state_rows_many(
 # History (аналоговые регистры → TimescaleDB hypertable)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def insert_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+# Есть ли столбец history.ts_status (добавляется миграцией 2.9.0, см.
+# schema/migrate_2.9.0.sql). Проверяется при старте: без столбца пишем
+# как раньше, а не теряем пакеты.
+_history_has_ts_status = True
+
+
+async def detect_history_ts_status(conn: asyncpg.Connection) -> bool:
+    global _history_has_ts_status
+    _history_has_ts_status = bool(await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'history' AND column_name = 'ts_status'
+        )
+        """
+    ))
+    return _history_has_ts_status
+
+
+async def insert_history_batch(conn: asyncpg.Connection, rows: list[tuple]) -> list[tuple]:
     """Batch insert в history (все типы регистров: аналог, enum, fault raw).
 
-    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw)
+    Tuple: (router_sn, equip_type, panel_id, addr, ts, value, raw, ts_status)
     ts — NOT NULL (TimescaleDB hypertable partition key).
+
+    (router_sn, equip_type, panel_id, addr, ts) уникален (индекс
+    idx_history_key_ts_uniq): занятый ключ не перезаписывается, побеждает
+    первая по прибытию. Возвращает строки, которые не вставились. Пока
+    индекса нет (до миграции), вставляется всё.
     """
     if not rows:
-        return
-    await conn.executemany(
+        return []
+    cols = list(zip(*rows))
+    if _history_has_ts_status:
+        sql = """
+            INSERT INTO history
+              (router_sn, equip_type, panel_id, addr, ts, value, raw, ts_status)
+            SELECT * FROM unnest(
+              $1::text[], $2::text[], $3::int[], $4::int[],
+              $5::timestamptz[], $6::numeric[], $7::int[], $8::text[])
+            ON CONFLICT DO NOTHING
+            RETURNING addr, ts
         """
-        INSERT INTO history
-          (router_sn, equip_type, panel_id, addr, ts, value, raw)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+    else:
+        sql = """
+            INSERT INTO history
+              (router_sn, equip_type, panel_id, addr, ts, value, raw)
+            SELECT * FROM unnest(
+              $1::text[], $2::text[], $3::int[], $4::int[],
+              $5::timestamptz[], $6::numeric[], $7::int[])
+            ON CONFLICT DO NOTHING
+            RETURNING addr, ts
+        """
+        cols = cols[:7]
+    inserted = await conn.fetch(sql, *(list(c) for c in cols))
+    if len(inserted) == len(rows):
+        return []
+    done = {(r["addr"], r["ts"]) for r in inserted}
+    return [r for r in rows if (r[3], r[4]) not in done]
+
+
+async def get_history_rows(
+    conn: asyncpg.Connection,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    keys: list[tuple[int, datetime]],
+) -> dict[tuple[int, datetime], asyncpg.Record]:
+    """Строки history по ключам (addr, ts) одной панели."""
+    if not keys:
+        return {}
+    addrs, stamps = zip(*keys)
+    rows = await conn.fetch(
+        """
+        SELECT h.addr, h.ts, h.value, h.raw
+        FROM history h
+        JOIN unnest($4::int[], $5::timestamptz[]) AS k(addr, ts)
+          ON h.addr = k.addr AND h.ts = k.ts
+        WHERE h.router_sn = $1 AND h.equip_type = $2 AND h.panel_id = $3
         """,
-        rows,
+        router_sn, equip_type, panel_id, list(addrs), list(stamps),
     )
+    return {(r["addr"], r["ts"]): r for r in rows}
 
 
 
@@ -341,27 +409,6 @@ async def close_data_gap(
         router_sn, equip_type, panel_id, gap_end,
     )
     # asyncpg returns "UPDATE N"
-    return int(result.split()[-1])
-
-
-async def extend_data_gap(
-    conn: asyncpg.Connection,
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    old_end: datetime,
-    new_end: datetime,
-) -> int:
-    """Продлить разрыв, закрытый меткой old_end, до new_end. Возвращает кол-во обновлённых."""
-    result = await conn.execute(
-        """
-        UPDATE data_gaps
-        SET gap_end = $5
-        WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
-          AND gap_end = $4
-        """,
-        router_sn, equip_type, panel_id, old_end, new_end,
-    )
     return int(result.split()[-1])
 
 

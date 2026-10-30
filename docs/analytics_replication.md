@@ -97,6 +97,13 @@ SELECT tablename FROM pg_publication_tables WHERE pubname = 'analytics_pub';
 SELECT slot_name, active FROM pg_replication_slots;
 ```
 
+> **На рабочем сервере (проверено 30.10.2026) `history` в `analytics_pub` нет.**
+> Публикуются 8 таблиц: `objects`, `equipment`, `register_catalog`,
+> `parameter_history`, `events`, `data_gaps`, `enum_history`, `fault_history`.
+> Слот `analytics_sub` активен. Если `history` добавят в публикацию,
+> на аналитике в ней должен быть столбец `ts_status` (db-writer ≥ 2.9.0,
+> `schema_analytics.sql`). Иначе подписка встанет на незнакомом столбце.
+
 ---
 
 ## Часть 2. Настройка на сервере аналитики

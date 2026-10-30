@@ -74,8 +74,13 @@ CREATE TABLE IF NOT EXISTS history (
     ts              TIMESTAMPTZ NOT NULL,
     received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     value           NUMERIC,
-    raw             INT
+    raw             INT,
+    ts_status       TEXT        -- ts_status декодера (db-writer ≥ 2.9.0)
 );
+
+-- Миграция: столбец нужен здесь раньше, чем на источнике (migrate_2.9.0.sql),
+-- иначе подписка остановится на незнакомом столбце
+ALTER TABLE history ADD COLUMN IF NOT EXISTS ts_status TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_history_key_ts
     ON history (router_sn, equip_type, panel_id, addr, ts DESC);

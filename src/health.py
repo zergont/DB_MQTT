@@ -21,7 +21,7 @@ from typing import Any
 
 from aiohttp import web
 
-from src import db
+from src import db, handlers
 from src.config import HealthCfg
 from src.version import get_version
 
@@ -104,6 +104,11 @@ def _payload(state: HealthState) -> dict[str, Any]:
         "workers_alive": workers_alive,
         "db_pool_size": _pool_size(),
         "failed_packets_total": state.failed_total,
+        # Проверки перед записью с момента запуска (см. handlers.guard_stats)
+        "data_guard": {
+            **handlers.guard_stats,
+            "ts_status": dict(handlers.guard_stats["ts_status"]),
+        },
     }
 
 

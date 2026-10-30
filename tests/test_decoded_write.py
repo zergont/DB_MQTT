@@ -73,9 +73,9 @@ class FakeDB:
 
     FUNCS = (
         "pool", "upsert_object", "upsert_equipment",
-        "insert_data_gap", "close_data_gap", "extend_data_gap",
+        "insert_data_gap", "close_data_gap",
         "get_latest_state_rows_many", "upsert_latest_state_batch",
-        "insert_history_batch", "insert_event_batch",
+        "insert_history_batch", "get_history_rows", "insert_event_batch",
         "open_enum_state_batch", "close_enum_states_batch",
         "open_fault_batch", "close_faults_batch",
         "get_open_gaps", "get_recent_packet_ts", "get_last_gap_ends",
@@ -85,7 +85,7 @@ class FakeDB:
         self.t: dict = {
             "latest": {},     # addr → {"value", "raw"}
             "latest_ts": {},  # addr → ts строки latest_state
-            "history": [],    # (addr, value, raw, ts)
+            "history": [],    # (addr, value, raw, ts, ts_status)
             "enum": [],       # {"addr", "value", "start", "end"}
             "fault": [],      # {"addr", "bit", "start", "end"}
             "gaps": [],
@@ -93,6 +93,7 @@ class FakeDB:
         }
         self.fail_once: set[str] = set()   # имена функций, которые упадут один раз
         self.window_end: datetime | None = None   # «сейчас» для окна get_recent_packet_ts
+        self.unique_history = True   # индекс idx_history_key_ts_uniq (после миграции 2.9.0)
         self.calls: list[str] = []
 
     # ── транзакции ──────────────────────────────────────────────────────────
@@ -158,15 +159,6 @@ class FakeDB:
                 n += 1
         return n
 
-    async def extend_data_gap(self, conn, router_sn, equip_type, panel_id, old_end, new_end):
-        self._enter("extend_data_gap")
-        n = 0
-        for g in self.t["gaps"]:
-            if g["end"] == old_end:
-                g["end"] = new_end
-                n += 1
-        return n
-
     async def get_open_gaps(self, conn):
         self._enter("get_open_gaps")
         return [g for g in self.t["gaps"] if g["end"] is None]
@@ -197,7 +189,7 @@ class FakeDB:
     async def upsert_latest_state_batch(self, conn, rows):
         self._enter("upsert_latest_state_batch")
         self._check_int4(rows)
-        future = datetime.now(timezone.utc) + timedelta(seconds=120)
+        future = datetime.now(timezone.utc) + timedelta(seconds=60)
         for r in rows:
             # Как WHERE в ON CONFLICT: к более старой метке строка не откатывается,
             # если её метка не убежала вперёд часов сервера
@@ -210,7 +202,25 @@ class FakeDB:
     async def insert_history_batch(self, conn, rows):
         self._enter("insert_history_batch")
         self._check_int4(rows)
-        self.t["history"].extend((r[3], r[5], r[6], r[4]) for r in rows)
+        # Как ON CONFLICT DO NOTHING с уникальным (регистр, ts): побеждает первая
+        taken = {(h[0], h[3]) for h in self.t["history"]} if self.unique_history else set()
+        rejected = []
+        for r in rows:
+            if (r[3], r[4]) in taken:
+                rejected.append(r)
+                continue
+            self.t["history"].append((r[3], r[5], r[6], r[4], r[7]))
+            if self.unique_history:
+                taken.add((r[3], r[4]))
+        return rejected
+
+    async def get_history_rows(self, conn, router_sn, equip_type, panel_id, keys):
+        self._enter("get_history_rows")
+        wanted = set(keys)
+        return {
+            (h[0], h[3]): {"value": h[1], "raw": h[2]}
+            for h in self.t["history"] if (h[0], h[3]) in wanted
+        }
 
     async def insert_event_batch(self, conn, rows):
         self._enter("insert_event_batch")
@@ -269,9 +279,11 @@ class DecodedTestCase(unittest.IsolatedAsyncioTestCase):
             handlers._last_write_ts, handlers._last_packet_ts, handlers._avg_interval,
             handlers._active_fault_bits, handlers._active_enum_states,
             handlers._raw_overflow_warned, handlers._heartbeat_ts, handlers._panel_settled_ts,
-            handlers._last_packet_late, handlers._panel_gap_end,
+            handlers._panel_gap_end, handlers._future_warned, handlers._conflict_warned,
         ):
             state.clear()
+        handlers.guard_stats.clear()
+        handlers.guard_stats.update(handlers._new_guard_stats())
 
         saved_maps = dict(register_map._maps)
         self.addCleanup(lambda: (register_map._maps.clear(), register_map._maps.update(saved_maps)))

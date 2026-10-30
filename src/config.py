@@ -132,9 +132,6 @@ class GapDetectorCfg:
     multiplier: int = 5
     ema_alpha: float = 0.1
     min_threshold_sec: int = 60
-    # Одиночная запоздалая пачка (ts_status=late) внутри разрыва не делит его
-    # на два: следующий разрыв продлевает тот, что она закрыла
-    merge_across_late: bool = True
 
 
 @dataclass
